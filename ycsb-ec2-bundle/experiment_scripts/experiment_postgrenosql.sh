@@ -103,6 +103,11 @@ initialize_database() {
 initialize_database "$DB_NAME"
 initialize_database "$UNCHANGE_DB_NAME"
 
+# Ensure output directories exist (redirections below fail with set -e otherwise)
+mkdir -p "$(dirname "$OUTPUT_FILE")" \
+         "$(dirname "$KEY_SIZE_FILE_AFTER_EXTEND")" \
+         "$(dirname "$KEY_SIZE_FILE_AFTER_RUN")"
+
 # Clear the log file and previous backups
 > $LOG_FILE
 rm -rf $KEY_SIZE_LOG
@@ -286,15 +291,35 @@ collect_postgres_metrics() {
             WHERE datname = '$db';
         " | tr '|' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
 
-    # bgwriter
-    read checkpoints_timed checkpoints_req buffers_checkpoint buffers_clean buffers_backend buffers_alloc checkpoint_write_time checkpoint_sync_time <<< \
-        $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -t -c "
-            SELECT checkpoints_timed, checkpoints_req,
-                   buffers_checkpoint, buffers_clean,
-                   buffers_backend, buffers_alloc,
-                   checkpoint_write_time, checkpoint_sync_time
-            FROM pg_stat_bgwriter;
-        " | tr '|' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
+    # Checkpoint + background writer stats.
+    # PG 17+ moved checkpoint stats to pg_stat_checkpointer and renamed the columns
+    # (num_timed, num_requested, write_time, sync_time, buffers_written).
+    # PG 18 also removed buffers_checkpoint/buffers_backend from pg_stat_bgwriter
+    # (only buffers_clean, maxwritten_clean and buffers_alloc remain).
+    if PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -c "\d pg_stat_checkpointer" &>/dev/null; then
+        read checkpoints_timed checkpoints_req checkpoint_write_time checkpoint_sync_time buffers_checkpoint <<< \
+            $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -t -c "
+                SELECT num_timed, num_requested,
+                       write_time, sync_time, buffers_written
+                FROM pg_stat_checkpointer;
+            " | tr '|' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
+        read buffers_clean buffers_alloc <<< \
+            $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -t -c "
+                SELECT buffers_clean, buffers_alloc
+                FROM pg_stat_bgwriter;
+            " | tr '|' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
+        # No per-backend flush counter exists on PG 17+; keep the column at 0.
+        buffers_backend=0
+    else
+        read checkpoints_timed checkpoints_req buffers_checkpoint buffers_clean buffers_backend buffers_alloc checkpoint_write_time checkpoint_sync_time <<< \
+            $(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -t -c "
+                SELECT checkpoints_timed, checkpoints_req,
+                       buffers_checkpoint, buffers_clean,
+                       buffers_backend, buffers_alloc,
+                       checkpoint_write_time, checkpoint_sync_time
+                FROM pg_stat_bgwriter;
+            " | tr '|' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
+    fi
 
     # wal metrics
     if PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$db" -c "\d pg_stat_wal" &>/dev/null; then
