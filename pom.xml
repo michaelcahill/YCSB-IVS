@@ -159,57 +159,14 @@ LICENSE file.
   </properties>
 
   <modules>
-    <!-- our internals -->
-    <module>core</module>
-    <module>binding-parent</module>
-    <module>distribution</module>
-    <!-- all the datastore bindings, lex sorted please -->
-    <module>accumulo1.9</module>
-    <module>aerospike</module>
-    <module>arangodb</module>
-    <module>asynchbase</module>
-    <module>azurecosmos</module>
-    <module>azuretablestorage</module>
-    <module>cassandra</module>
-    <module>cloudspanner</module>
-    <module>couchbase</module>
-		<module>couchbase2</module>
-		<module>crail</module>
-    <module>dynamodb</module>
-    <module>elasticsearch</module>
-    <module>elasticsearch5</module>
-    <module>foundationdb</module>
-    <module>geode</module>
-    <module>googlebigtable</module>
-    <module>googledatastore</module>
-    <module>griddb</module>
-    <module>hbase1</module>
-    <module>hbase2</module>
-    <module>ignite</module>
-    <module>infinispan</module>
-    <module>jdbc</module>
-    <module>kudu</module>
-    <module>maprdb</module>
-    <module>maprjsondb</module>
-    <module>memcached</module>
-    <module>mongodb</module>
-    <module>neo4j</module>
-    <module>nosqldb</module>
-    <module>orientdb</module>
-    <module>postgrenosql</module>
-    <module>rados</module>
-    <module>redis</module>
-    <module>rest</module>
-    <module>riak</module>
-    <module>rocksdb</module>
-    <module>s3</module>
-    <module>seaweedfs</module>
-    <module>scylla</module>
-    <module>solr7</module>
-    <module>tarantool</module>
-    <module>tablestore</module>
-    <module>voltdb</module>
-    <module>zookeeper</module>
+    <module>ycsb-ec2-bundle/binding-parent</module>
+    <module>ycsb-ec2-bundle/core</module>
+    <module>ycsb-ec2-bundle/couchbase</module>
+    <module>ycsb-ec2-bundle/couchbase2</module>
+    <module>ycsb-ec2-bundle/jdbc-array</module>
+    <module>ycsb-ec2-bundle/jdbc</module>
+    <module>ycsb-ec2-bundle/mongodb</module>
+    <module>ycsb-ec2-bundle/neo4j</module>
   </modules>
 
   <build>

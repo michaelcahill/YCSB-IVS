@@ -25,5 +25,14 @@ output*
 /differentbin/
 jdbc-binding/lib/postgresql-42.7.8.jar
 ycsb-ec2-bundle.zip
-ycsb-ec2-bundle/
 analysis/
+
+# ycsb-ec2-bundle experiment outputs
+ycsb-ec2-bundle/analysis/
+ycsb-ec2-bundle/analysis/Data/
+ycsb-ec2-bundle/analysis/neo4j_output.csv
+ycsb-ec2-bundle/experiment_scripts/*.log
+ycsb-ec2-bundle/experiment_scripts/histogram.txt
+ycsb-ec2-bundle/experiment_scripts/key_sizes.csv
+ycsb-ec2-bundle/experiment_scripts/keys*.txt
+ycsb-ec2-bundle/experiment_scripts/neo4j_query_plan.log
