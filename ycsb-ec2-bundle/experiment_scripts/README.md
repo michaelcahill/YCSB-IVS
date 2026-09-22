@@ -55,6 +55,46 @@ PostgreSQL requirements for evidence-producing full-visibility runs:
 - `track_io_timing` must be `on`.
 - `log_checkpoints` must be `on`.
 
+### PostgreSQL Initial Setup (One-Time)
+
+On a fresh instance, create the benchmark role and server settings once as the
+`postgres` superuser. The scripts expect the role name and password configured
+in each script (`DB_USERNAME`/`DB_PWD`, e.g. `ycsb` by convention); adjust the
+SQL to match.
+
+```bash
+sudo -u postgres psql -X <<'SQL'
+-- LOGIN:        scripts connect over TCP as this role (JDBC + psql/createdb/pg_dump)
+-- CREATEDB:     scripts run createdb/dropdb for the benchmark databases
+-- SUPERUSER:    needed to create the non-trusted extensions listed above
+--               (pg_buffercache, pg_freespacemap, pg_prewarm, ...).
+--               Alternatively, drop SUPERUSER and create those extensions as
+--               `postgres` in each database ahead of time.
+CREATE ROLE ycsb WITH LOGIN PASSWORD 'USyd2025' CREATEDB SUPERUSER;
+SQL
+```
+
+Then set the required server parameters in `postgresql.conf` (or via
+`ALTER SYSTEM`) and restart PostgreSQL:
+
+```conf
+shared_preload_libraries = 'pg_stat_statements'
+track_io_timing = on
+log_checkpoints = on
+```
+
+```bash
+sudo systemctl restart postgresql
+```
+
+Finally, make sure `pg_hba.conf` allows password authentication (`scram-sha-256`
+or `md5`) for the role over localhost TCP, since both the JDBC URL
+(`jdbc:postgresql://localhost:5432/...`) and the CLI invocations
+(`PGPASSWORD=... psql -U ycsb ...`) rely on it. Restart again if you changed
+`pg_hba.conf`.
+
+Verify the setup with the quick environment check below.
+
 Quick environment check:
 
 ```bash
