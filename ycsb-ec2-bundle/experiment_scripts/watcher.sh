@@ -79,11 +79,10 @@ psql_csv() {
     local database="$1"
     local query="$2"
 
-    printf '%s\n' "$query" | PGPASSWORD="$DB_PWD" psql -X -q -t -A -F"," \
+    printf '%s\n' "$query" | PGPASSWORD="$DB_PWD" sudo -u postgres psql -X -q -t -A -F"," \
         -v ON_ERROR_STOP=1 \
         -v watch_db="$db_name" \
         -v stats_table="$DB_STATS_TABLE" \
-        -U "$DB_USERNAME" \
         -d "$database" 2>/dev/null | sed '/^[[:space:]]*$/d' | head -n 1
 }
 
@@ -743,8 +742,8 @@ last_db_stats=0
 
 while true; do
     # --- Get PIDs ---
-    pids=$(printf '%s\n' "SELECT pid FROM pg_stat_activity WHERE datname = :'watch_db';" \
-        | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d postgres -t -A \
+    pids=$(printf '%s\n' "SELECT pid FROM pg_stat_activity WHERE datname =  '$db_name';" \
+        | sudo -u postgres     psql                   -d postgres -t -A \
         -v ON_ERROR_STOP=1 \
         -v watch_db="$db_name" 2>/dev/null \
         | paste -sd "," -)
