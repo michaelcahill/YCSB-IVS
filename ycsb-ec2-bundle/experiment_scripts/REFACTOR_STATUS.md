@@ -1,17 +1,18 @@
 # Refactor Status — experiment scripts
 
 Plan: [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) · Branch: `refactor/experiment-scripts`
-Last updated: **steps 1–4 complete; step 5 in progress (all PostgreSQL backends including the
-new `postgresql_json`, plus mariadb_innodb, mongodb, neo4j and couchbase, verified end-to-end)**
-— one runner (`experiment.sh <backend>`), **eight** verified backends behind shared modules, an
-engine that calls nothing but `backend::*`, a layered config layer with a legacy-launcher alias
-shim (variable names *and* backend names), and **workload files are read-only templates** (one
-generated file per phase in the experiment directory). Goldens unchanged apart from the intended
-`-P` paths. Step 5 has one port left, **mariadb_rocksdb**, which needs a MariaDB build with the
-RocksDB engine (absent from the stock image). Its step's other deliverable — the shim for
-`experiment_postgresql_array_json.sh` — is **held pending your answer** (see "Open questions") — that script is `run_postgresql_array_json_full_visibility.sh`'s callee, so shimming it now would
-delete full visibility before the EC2 gate that exists to protect it. Steps 6–7 follow; there is
-no instrumentation module any more.
+Last updated: **steps 1–5 complete — every backend is ported and verified end-to-end** (nine:
+`postgresql_textarray`, `postgresql_row`, `postgresql_json`, `postgrenosql`, `mariadb_innodb`,
+`mariadb_rocksdb`, `mongodb`, `neo4j`, `couchbase`) — one runner (`experiment.sh <backend>`), nine
+verified backends behind shared modules, an engine that calls nothing but `backend::*`, a layered
+config layer with a legacy-launcher alias shim (variable names *and* backend names), and
+**workload files are read-only templates** (one generated file per phase in the experiment
+directory). Goldens unchanged apart from the intended `-P` paths. The single leftover of step 5 —
+the shim for `experiment_postgresql_array_json.sh` — is **held by your decision**: that script is
+`run_postgresql_array_json_full_visibility.sh`'s callee, so shimming it would delete full
+visibility before the EC2 gate that exists to protect it; it folds into step 8c. Next up:
+**step 6 (`--mode baseline`)**, then step 7 (tooling + README). There is no instrumentation module
+any more.
 
 Read this file first after an interruption. Append to the **Log** at every meaningful
 checkpoint, and keep the **Step status** table current.
@@ -36,6 +37,7 @@ checkpoint, and keep the **Step status** table current.
 | MariaDB container | ✅ up, verified | `ycsb_mariadb` = `mariadb:11` on `-p 3307:3306`; role `ycsb` needs **`GRANT ALL PRIVILEGES ON *.*`** (load phase inserts). Endpoint + wrap in untracked `conf/db.mariadb_innodb.env`. MariaDB JDBC driver (`jdbc/target/dependency/mariadb-java-client-3.4.1.jar`) checked via `BACKEND_DRIVER_JAR` |
 | MongoDB container | ✅ up, verified | `ycsb_mongo` = `mongo:5.0` on `-p 27017`, no auth. Admin tools run through **`MONGO_CLI_WRAP=podman exec -i ycsb_mongo`**; endpoint + wrap in untracked `conf/db.mongodb.env`. Binding got a minimal `mongodb/conf/mongodb.properties` (every YCSB invocation needs one) |
 | Neo4j containers | ✅ up, verified | three instances (`ycsb_neo4j_{main,backup,unchange}` = `neo4j:5`, ports 7687/7787/7887, password `USyd2025`), because Community has **one user database per instance**. `NEO4J_CLI_WRAP_<ROLE>=podman exec -i …` + Bolt URI; APOC enabled; **shared podman volume for the import dir** with world-writable `tmp/` (needed by the clean-run graphml copy). Full wrap config in untracked `conf/db.neo4j.env` |
+| MariaDB RocksDB container | ✅ up, verified | MyRocks exists in **no official image**. Pulled `docker.io/devonkupiec/mariadb-rocksdb` (MariaDB **10.3.27**, 5 years old, `SHOW ENGINES` lists ROCKSDB as DEFAULT) as `ycsb_mariadb_rocksdb` on `-p 3308:3306`, role `ycsb`/`USyd2025` with `GRANT ALL ON *.*`. Endpoint + wrap in untracked `conf/db.mariadb_rocksdb.env`; **both that file and the example carry the caveat** that this image verifies the port and is not an evidence host — EC2 RocksDB evidence needs a server built `-DPLUGIN_ROCKSDB=YES` |
 | `pre-refactor-scripts` tag | ✅ created 2026-09-24 | points at `03f96d44`, the last commit before step 0 — every legacy runner exactly as written. Plan §9 promised this escape hatch and it did not exist. `experiment_postgresql_array_json.sh`, `run_postgresql_array_json_full_visibility.sh` and `benchmark_observability.py` are byte-identical in tag and working tree (`watcher.sh` differs: step 0 fixed bugs in it). `git worktree add ../pre-refactor pre-refactor-scripts` reproduces a full-visibility run |
 | Couchbase container | ✅ up, verified | `ycsb_couchbase` = **`docker.io/library/couchbase:community-7.6.2`** started with `--net=host` (so the cluster advertises `127.0.0.1` and the SDK works), `cluster-init --services data,index,query`. Three buckets + one local RBAC user per bucket named exactly like it (SDK 2.x authenticates as the bucket). Runner can create missing buckets/users itself (`COUCHBASE_CREATE_MISSING_BUCKETS=1`). Config in untracked `conf/db.couchbase.env` |
 
@@ -54,6 +56,7 @@ python3 -m unittest discover -s tests -t tests     # mock-based runner tests, no
 DB_PWD=USyd2025 bash tests/smoke_authoritative.sh  # real PG18 end-to-end vs goldens
 DB_PWD=USyd2025 bash tests/smoke_backend.sh mariadb_innodb  # structural, any reachable backend
 bash tests/smoke_backend.sh mongodb|neo4j|couchbase  # needs the matching container
+bash tests/smoke_backend.sh mariadb_rocksdb         # needs the MyRocks image (conf/db.mariadb_rocksdb.env)
 
 # is a server reachable for one backend? (what run_tests.sh uses to skip)
 ./experiment.sh <backend> --check
@@ -73,7 +76,7 @@ directory is kept for inspection.
 | 2 | Backend module, `registry.sh`, `experiment.sh` dispatcher | ✅ done | authoritative script is a compatibility shim; both entry paths golden-identical |
 | 3 | `config.sh` + `conf/` presets + alias shim + help/dry-run | ✅ done | parsed-not-executed config; legacy aliases with deprecation lines |
 | 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | ✅ done | immutable provenance-tagged files; all in-place rewrites gone; smoke asserts `../workloads` stays clean |
-| 5 | Engine + backend ports | ⏳ **in progress** | **done (8, all verified end-to-end):** engine drives only `backend::*`; PostgreSQL split into `_postgresql_common.sh` + `postgresql_textarray`/`postgresql_row`/`postgresql_json`/`postgrenosql`, plus `mariadb_innodb` (on `_mariadb_common.sh`), `mongodb`, `neo4j`, `couchbase` — each ported legacy script is a one-line shim and in `BACKEND_SMOKES`. **Remaining:** (a) mariadb_rocksdb — stock MariaDB image has no RocksDB engine; needs a purpose-built image or ships unverified (no shim, no deletion). (b) the one-line shim for `experiment_postgresql_array_json.sh` — **held**: `run_postgresql_array_json_full_visibility.sh` execs that script, so shimming it deletes full visibility ahead of the 8c EC2 gate |
+| 5 | Engine + backend ports | ✅ **done** | **nine backends, all verified end-to-end:** engine drives only `backend::*`; PostgreSQL split into `_postgresql_common.sh` + `postgresql_textarray`/`postgresql_row`/`postgresql_json`/`postgrenosql`, MariaDB into `_mariadb_common.sh` + `mariadb_innodb`/`mariadb_rocksdb`, plus `mongodb`, `neo4j`, `couchbase` — each ported legacy script is a one-line shim and in `BACKEND_SMOKES`. Only the `experiment_postgresql_array_json.sh` shim is outstanding, **deliberately held** (its sibling launcher execs it) and therefore folded into 8c |
 | 6 | `--mode baseline`; delete legacy `*_baseline.sh` | ⬜ pending | `--mode baseline` currently rejected by `experiment.sh` |
 | 7 | `tools/bundle.sh`, `tools/deploy.sh`, README rewrite, gitignore | ⬜ pending | |
 | 8a/8b | ~~`postgresql_json` backend · fullview instrumentation module~~ | ➖ folded/cancelled | 8a → step 5(b) **done** (`postgresql_json`, verified); 8b **cancelled** — WAL / `pg_stat_statements` / residency / prewarm / checkpoint-log / sampling / detoast probes are discarded (plan §4), and the `--instrument` placeholder is deleted from `experiment.sh` |
@@ -83,39 +86,36 @@ Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked · ➖ cancell
 
 ## Where to resume
 
-Step 5 has one port left, plus one decision that is yours:
+All backends are ported. Next is **step 6 (`--mode baseline`)**; the items below are the
+carry-overs to remember while doing it.
 
-- **Done: `postgresql_json` (step 5b).** `lib/backends/postgresql_json.sh` sources
-  `_postgresql_common.sh` and overrides only `info` (`default_binding=jdbc-array-json`,
-  `default_type=postgresql_arrayjson_TOAST` — the legacy artefact prefix —,
-  `default_workload=workloada-extend`, capability flags copied from `postgresql_textarray`,
-  `min_server_version_num=180000`), `init_db` (`fieldN JSONB` × 10 + `ycsb_key TEXT PRIMARY
-  KEY`), `size_expression` (Σ over the ten fields of `COALESCE((SELECT SUM(octet_length(value))
-  FROM jsonb_array_elements_text(COALESCE(fieldN, '[]'::jsonb))), 0)`) and `default_config`.
-  Nothing else came across: no extensions, no second DB identity, no server-log access, no
-  `jdbc.readsample.*`. It is in `BACKEND_SMOKES` **and** `REQUIRED_BACKEND_SMOKES`, verified
-  end-to-end against PG 18 (all 8 phases, 74-column CSV, load = exactly 10 × fieldlength per
-  row, extend grows the arrays), and `--instrument` is gone from `experiment.sh` while
-  `config::warn_deferred_legacy` became `config::warn_discarded_legacy`.
-- **The array_json shim (step 5b, held).** The plan's last item for this step is a one-line
-  shim mapping `VALUE_VARIANT` → backend, but
+- **Held for 8c: the `experiment_postgresql_array_json.sh` shim.** The plan's last item of step 5
+  is a one-line shim mapping `VALUE_VARIANT` → backend, but
   `run_postgresql_array_json_full_visibility.sh` ends in `exec ./experiment_postgresql_array_json.sh
-  --full-visibility …`, so replacing that script now removes full visibility *before* the EC2
-  confirmation step 8c waits for. Chosen course: leave the legacy pair alone (a FROZEN header
-  comment was added, no code changed), i.e. the same "no shim, no deletion" rule every unverified
-  backend follows, and point at `postgresql_json` from the config warning instead. Say the word
-  and it is minutes of work: `case "${VALUE_VARIANT:-jsonb_array}" in jsonb_array) →
-  postgresql_json ;; text_array) → postgresql_textarray ;; text_scalar) → postgresql_row ;; esac`
-  with a notice that full visibility is gone, plus deleting the wrapper if you want both at once.
-- **mariadb_rocksdb (step 5a)** — a MariaDB variant, so `_mariadb_common.sh` covers most of
-  it, but the stock `docker.io/library/mariadb:11` image has no RocksDB storage engine:
-  either find a purpose-built image or ship the port unverified (no shim, no deletion — same
-  rule as before). Its legacy runner is still in `LEGACY_WITH_WARNINGS`. Steps 6–7 after that.
+  --full-visibility …`, so replacing that script removes full visibility *before* the EC2
+  confirmation step 8c waits for. Agreed course (2026-09-24): leave the legacy pair alone (a FROZEN
+  header comment only, no code changed) and point at `postgresql_json` from the config warning.
+- **Done: `postgresql_json` (step 5b).** `lib/backends/postgresql_json.sh` sources
+  `_postgresql_common.sh` and overrides only `info` (`jdbc-array-json`,
+  `default_type=postgresql_arrayjson_TOAST` — the legacy artefact prefix —, `workloada-extend`,
+  capability flags copied from `postgresql_textarray`), `init_db` (`fieldN JSONB` × 10) and
+  `size_expression`. Nothing else came across: no extensions, no second DB identity, no
+  server-log access, no `jdbc.readsample.*`. Verified against PG 18 (74-column CSV; a fresh load
+  measures exactly 10 × fieldlength per row); in `BACKEND_SMOKES` **and**
+  `REQUIRED_BACKEND_SMOKES`; `--instrument` deleted from `experiment.sh` and
+  `config::warn_deferred_legacy` renamed to `config::warn_discarded_legacy`.
+- **Done: `mariadb_rocksdb` (step 5a).** `lib/backends/mariadb_rocksdb.sh` on
+  `_mariadb_common.sh`: same ten LONGTEXT columns as InnoDB (so a size difference is an engine
+  effect) with `ENGINE=RocksDB DEFAULT COLLATE=latin1_bin`, and its own 35-column statistics set
+  read from `SHOW GLOBAL STATUS 'Rocksdb%'` plus `information_schema.ROCKSDB_CFSTATS /
+  ROCKSDB_DBSTATS / ROCKSDB_SST_PROPS`. Verified end-to-end on a real MyRocks server (57-column
+  CSV, dump/restore included, compaction/WAL/stall counters non-zero). Its legacy runner is a shim
+  and left `LEGACY_WITH_WARNINGS`; the *_baseline sibling waits for step 6.
 
 - `./experiment.sh <backend> --check` runs that backend's preflight (server reachable, role
   allowed to create/drop, build artifacts present) and exits without benchmarking — that is
   how `run_tests.sh` decides to run or skip a smoke, and the fastest way to separate "not
-  installed here" from "broken". All eight ported backends are in `BACKEND_SMOKES`, so any
+  installed here" from "broken". All nine ported backends are in `BACKEND_SMOKES`, so any
   can be re-verified with `bash tests/smoke_backend.sh <backend>` once its server answers;
   `REQUIRE_DB=1` still fails when a *required* backend (the PostgreSQL family) is
   unreachable.
@@ -136,6 +136,14 @@ Step 5 has one port left, plus one decision that is yours:
   fieldlength per row (verified: min 1000 at fieldlength 100) and extend growth is comparable
   with `postgresql_textarray` row for row. `postgrenosql` is the deliberate exception: its size
   includes the document's JSON syntax.
+- MyRocks is not in any official MariaDB image, and its MariaDB 10.3 build differs from the
+  legacy script's assumptions in three ways that matter: a **767-byte index key limit** (a utf8mb4
+  VARCHAR(255) primary key needs 1020, hence `DEFAULT COLLATE=latin1_bin` on the table — YCSB data
+  is ASCII so stored bytes are unaffected), no per-level SST view (`lsm_levels` reports 0), and
+  `SHOW ENGINE ROCKSDB STATUS` prints **none** of the five phrases the legacy runner grepped, so
+  all five of its LSM columns were empty on this engine. Statistics now come from
+  `information_schema.ROCKSDB_CFSTATS / ROCKSDB_DBSTATS / ROCKSDB_SST_PROPS`, and the legacy
+  `sudo du /var/lib/mysql/#rocksdb/*.sst` is replaced by `total_sst_size` from SQL.
 - Steps 6–7: baseline mode, tooling/README rewrite (see plan §8). No instrumentation layer —
   plan §4 records why the array_json samplers are dropped rather than ported.
 
@@ -215,11 +223,6 @@ Step 5 has one port left, plus one decision that is yours:
 
 ## Open questions for the user
 
-- **Shim `experiment_postgresql_array_json.sh` now, or hold it to 8c?** Plan §8 says shim it in
-  step 5(b); its own §8c gate ("keep full visibility runnable until you confirm on EC2") and its
-  §9 risk note say the opposite, because `run_postgresql_array_json_full_visibility.sh` execs it.
-  Held for now (legacy pair untouched apart from a header comment; `postgresql_json` verified and
-  reachable on its own). One answer settles it — "shim it" is minutes of work.
 
 - **`log()` allow-list drops real progress lines.** `lib/common.sh` echoes only recognised
   message shapes, so e.g. `Initial-load verification - TotalSize:…`, `Extend verification - …`,
@@ -238,6 +241,29 @@ Step 5 has one port left, plus one decision that is yours:
 - EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.
 
 ## Log
+
+### 2026-09-24 — step 5 tail (a): `mariadb_rocksdb` backend, verified end-to-end → step 5 done
+
+- Pulled `docker.io/devonkupiec/mariadb-rocksdb` (MariaDB 10.3.27, MyRocks compiled in, ROCKSDB
+  shown as DEFAULT) after confirming no official image carries the engine; started it as
+  `ycsb_mariadb_rocksdb` on `-p 3308:3306`, role `ycsb` with `GRANT ALL ON *.*`, endpoint + wrap in
+  untracked `conf/db.mariadb_rocksdb.env` (+ tracked `.example`). Both files say out loud that this
+  five-year-old image verifies the port and is **not** an evidence host.
+- New `lib/backends/mariadb_rocksdb.sh` on `_mariadb_common.sh`: identical column types to
+  `mariadb_innodb` with `ENGINE=RocksDB DEFAULT COLLATE=latin1_bin`, plus a backend-declared
+  35-column statistics set (LSM facts from information_schema + the `Rocksdb_*` counters: rows,
+  memtables, block cache, L0/L1/L2+ read hits, WAL/flush/compaction bytes, write stalls).
+  Replaces two things the legacy runner could not do portably — greps that match nothing on this
+  engine, and `sudo du` over the server's data directory (see Facts above for all of it).
+- `experiment_mariadb_rocksdb.sh` is now a one-line shim and left `LEGACY_WITH_WARNINGS`; added to
+  `BACKEND_SMOKES` (deliberately **not** required — the special image will not always be up).
+- Alias test rewritten: every alias must resolve to an existing backend file, which `rocksdb` now
+  does (58 shell tests).
+- Suite: static checks PASS · 58 shell + 7 python OK · authoritative smoke PASS vs unchanged
+  goldens · **eight** structural backend smokes PASS, mariadb_rocksdb included (8 phases,
+  dump/restore verified, 6 rows × 57 columns, non-zero compaction/WAL counters in the CSV).
+- Step 5 is therefore complete: nine backends behind one engine. Only the held array_json shim
+  remains of it, folded into 8c by your decision.
 
 ### 2026-09-24 — step 5 tail (b): `postgresql_json` backend, verified end-to-end
 
@@ -290,5 +316,5 @@ Step 5 has one port left, plus one decision that is yours:
 
 ### Next checkpoint
 
-mariadb_rocksdb (step 5a — needs a MariaDB image with the RocksDB engine, otherwise ship the
-module unverified) or step 6 (`--mode baseline`). Awaiting your call on the array_json shim.
+Step 6: `--mode baseline` (`lib/lifecycle_baseline.sh`, then delete the eight legacy
+`*_baseline.sh`). Step 5 is complete; the array_json shim is settled (held for 8c).

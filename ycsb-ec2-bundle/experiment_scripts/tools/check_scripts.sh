@@ -20,7 +20,6 @@ SHELLCHECK_EXCLUDE=SC1091,SC2016,SC2029,SC2064,SC2034,SC2154
 LEGACY_WITH_WARNINGS=(
     ./experiment_couchbase_baseline.sh
     ./experiment_mariadb_innodb_baseline.sh
-    ./experiment_mariadb_rocksdb.sh
     ./experiment_mariadb_rocksdb_baseline.sh
     ./experiment_mongodb_baseline.sh
     ./experiment_neo4j_baseline.sh

@@ -12,8 +12,9 @@ Authoritative specification: `experiment_postgresql_array-text-autovacuum.sh`.
 > phase loop, watcher and CSV pipeline as the other PostgreSQL backends. That work moved
 > from step 8 into **step 5 tail (b)**; steps 8a/8b are gone.
 
-**Status: steps 0–4 complete; step 5 nearly complete** (8 backends verified end-to-end, incl.
-`postgresql_json`; only `mariadb_rocksdb` and the array_json shim remain).
+**Status: steps 0–5 complete** — nine backends verified end-to-end (`postgresql_textarray`,
+`postgresql_row`, `postgresql_json`, `postgrenosql`, `mariadb_innodb`, `mariadb_rocksdb`,
+`mongodb`, `neo4j`, `couchbase`). Of step 5 only the array_json shim remains, **held for 8c**.
 This file now carries only what the **remaining work** (§8) needs — the original
 duplication analysis, migration rows for completed steps, and the §10 bug list (all fixed
 in step 0) were trimmed; full detail lives in git history (`git log -- REFACTOR_PLAN.md`).
@@ -59,9 +60,9 @@ experiment_scripts/
 │   ├── common.sh config.sh registry.sh workload.sh metrics.sh results.sh
 │   ├── keysizes.sh watcher_runner.sh lifecycle.sh          # ✅
 │   ├── lifecycle_baseline.sh                                # ⬜ step 6 (2-phase engine)
-│   └── backends/            # ✅ postgresql_textarray/_row/json/postgrenosql, mariadb_innodb,
-│                            #    mongodb, neo4j, couchbase (+ _postgresql_common, _mariadb_common)
-│       └── mariadb_rocksdb.sh                               # ⬜ step 5 tail (a)
+│   └── backends/            # ✅ postgresql_textarray/_row/json/postgrenosql,
+│                            #    mariadb_innodb/mariadb_rocksdb, mongodb, neo4j, couchbase
+│                            #    (+ _postgresql_common, _mariadb_common) — all nine ported
 ├── conf/                    # ✅ db.<backend>.env (0600, gitignored), scale.{heavy,light}.env
 ├── tools/
 │   ├── check_scripts.sh     # ✅ shellcheck ratchet (legacy list only shrinks)
@@ -177,7 +178,7 @@ core rejects unknown flags first.
 
 | # | Work | Verification |
 | --- | --- | --- |
-| **5 tail (a)** | `mariadb_rocksdb` backend on `_mariadb_common.sh`. Stock `docker.io/library/mariadb:11` has no RocksDB engine → find a purpose-built image, or ship the module **unverified** (no shim, no deletion — same rule as before). | Structural smoke if a server answers; otherwise module only |
+| ~~**5 tail (a)**~~ **done** | `mariadb_rocksdb` backend on `_mariadb_common.sh`. No official MariaDB image has the RocksDB engine; verified against `docker.io/devonkupiec/mariadb-rocksdb` (MariaDB 10.3 + MyRocks), which is documented in `conf/db.mariadb_rocksdb.env(.example)` as a verification server and **not** an evidence host. Statistics come from `SHOW GLOBAL STATUS 'Rocksdb%'` + `information_schema.ROCKSDB_CFSTATS/DBSTATS/SST_PROPS`; the legacy `sudo du` of the engine's data directory is gone, `lsm_levels` reports 0 on engines without a per-level view. | Structural smoke PASS (8 phases, dump/restore verified, 6 rows × 57 columns, non-zero compaction/WAL/stall counters); in `BACKEND_SMOKES`, not required (special image) |
 | ~~**5 tail (b)**~~ **done** | `postgresql_json` backend = **only the jsonb data model** of `experiment_postgresql_array_json.sh`, on `_postgresql_common.sh`: DDL `fieldN JSONB`; `backend::size_expression` = Σ over the 10 fields of `COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(fieldN, '[]'::jsonb))), 0)`; `default_binding=jdbc-array-json`, artifact `jdbc-array-json/target/*.jar`, capability flags copied from `postgresql_textarray`, `postgresql::base_config` defaults. **Everything else in that script is discarded per §4** — phase loop, watcher, statistics columns, key-size/histogram pipeline and CSV all come from core exactly as for `postgresql_textarray`. Also done: deleted the reserved `--instrument` branch in `experiment.sh` and rewrote the stale deferral text in `lib/config.sh` (`config::warn_discarded_legacy`). **Held:** the one-line shim mapping `VALUE_VARIANT` → backend (jsonb_array→`postgresql_json`, text_array→`postgresql_textarray`, text_scalar→`postgresql_row`), because `run_postgresql_array_json_full_visibility.sh` execs that script and shimming it deletes full visibility before this plan's own 8c EC2 gate — see REFACTOR_STATUS "Open questions". | Standard smoke goldens PASS; in `BACKEND_SMOKES` **and** `REQUIRED_BACKEND_SMOKES`; `./experiment.sh postgresql_json --check` PASS; structural smoke PASS (8 phases, 74-column CSV) |
 | **6** | Baseline mode (`lifecycle_baseline.sh`) on the same engine: *authoritative* behaviour with comparison/reference phases disabled — legacy `*_baseline.sh` bodies are discarded per §0 (note: the PG array baseline is already broken on PG 18 via `buffers_backend`). Delete those 8 files. | Smoke `--mode baseline`; schema identical |
 | **7** | Ops: `tools/bundle.sh` (inline lib + selected backends into one `experiment.bundle.sh`, preserving the single-file scp deploy at `README.md:344-390`), `tools/deploy.sh` (tar to EC2), README rewrite (§Deploy / Clean EC2 Run / Launcher / Verify / Output Layout), `.gitignore` for `.DS_Store`/`__pycache__`, remove committed `.pyc`. | Fresh-EC2 dry run executed strictly from the rewritten runbook; bundle smoke-tested in CI |
@@ -223,7 +224,7 @@ smoking both tree and bundle.
 ## 10. Acceptance criteria — remaining
 
 - Shell line count reduced from ~16.8k to **<5k** (legacy scripts deleted at 8c).
-- Every backend (incl. mariadb_rocksdb, `postgresql_json`) passes smoke with the standard CSV
+- ✅ Every backend (incl. mariadb_rocksdb, `postgresql_json`) passes smoke with the standard CSV
   base schema; `postgresql_json` runs the identical engine path as its PostgreSQL siblings —
   its only differences from legacy array_json are the discarded observability (§4) and the
   shared statistics column set.

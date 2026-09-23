@@ -266,10 +266,17 @@ for alias_name in postgresql_array jsonb innodb; do
         ok
     fi
 done
-# An alias may only point at something that exists; rocksdb is allowed to fail with the
-# standard "unknown backend" message, so it is checked for resolution rather than success.
-[[ -f "$(registry::resolve jsonb 2>/dev/null)" ]] && ok || bad "alias jsonb does not resolve to a file"
-registry::resolve rocksdb >/dev/null 2>&1 && bad "rocksdb resolves before its backend exists" || ok
+# An alias may only point at a backend that exists, and it has to resolve to exactly the file
+# the real name would. (This is what catches an alias left behind when its backend is renamed.)
+for alias_name in postgresql postgresql_array jsonb innodb rocksdb; do
+    resolved="$(registry::resolve "$alias_name" 2>/dev/null)"
+    target="$(registry::alias "$alias_name")"
+    if [[ "$resolved" == "$BACKENDS_DIR/$target.sh" && -f "$resolved" ]]; then
+        ok
+    else
+        bad "alias $alias_name should resolve to $target.sh, got '$resolved'"
+    fi
+done
 registry::resolve _postgresql_common >/dev/null 2>&1 && bad "shared modules are not backends" || ok
 
 for backend in $(registry::available); do
