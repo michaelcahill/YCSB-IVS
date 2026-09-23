@@ -2,10 +2,10 @@
 # PostgreSQL backend (text-array schema, jdbc-array binding) — the reference backend
 # for the experiment harness. Sourced by lib/registry.sh, never run directly.
 #
-# The legacy function names (pg_cli, pg_exec, collect_postgres_metrics, …) remain the
-# implementation so today's engine keeps working unchanged; the backend:: entry points
-# at the bottom are the contract lifecycle.sh uses. The aliases go away once every
-# runner drives the contract directly (REFACTOR_PLAN.md step 5).
+# Everything named backend::* is part of the contract lib/lifecycle.sh calls; the single
+# lowercase function in this file (pg_cli) is private. PostgreSQL SQL, endpoint defaults
+# and server-version checks live here and nowhere else, so supporting another database
+# means adding one file.
 
 PG_MAINTENANCE_DB="${PG_MAINTENANCE_DB:-postgres}"
 
@@ -32,13 +32,13 @@ pg_cli() {
     return "$rc"
 }
 
-pg_exec() {
+backend::exec() {
     # Ignore user psqlrc formatting and stop on SQL errors, including stdin/-f.
     pg_cli psql -X -q -v ON_ERROR_STOP=1 "$@"
 }
 
 
-collect_postgres_metrics() {
+backend::collect_metrics() {
     local db="${1:-$DB_NAME}"
     local scope="${2:-all}" output value field index metric alias
     local extra_select="" extra_joins=""
@@ -68,7 +68,7 @@ collect_postgres_metrics() {
     fi
     log "START statistics snapshot database=$db scope=$scope"
     # Capture the exit status BEFORE read: read <<< $(psql ...) hides SQL errors.
-    if ! output=$(pg_exec -d "$db" -At -F '|' -c "
+    if ! output=$(backend::exec -d "$db" -At -F '|' -c "
         SELECT d.blks_read, d.blks_hit, d.tup_returned, d.tup_fetched,
                d.tup_inserted, d.tup_updated, d.tup_deleted, d.deadlocks,
                d.temp_files, d.temp_bytes, c.num_timed, c.num_requested,
@@ -110,7 +110,7 @@ collect_postgres_metrics() {
     log "DB statistics $dbmetrics"
 
 	# check for relation sizes too
-    if ! size_output=$(pg_exec -d "$db" -At -F '|' -c "
+    if ! size_output=$(backend::exec -d "$db" -At -F '|' -c "
         SELECT c.relname AS relation_name,
  				CASE c.relkind
   			      WHEN 'r' THEN 'table'
@@ -150,7 +150,7 @@ collect_postgres_metrics() {
     log "END statistics snapshot database=$db statistics=${#names[@]} relsizes=$relsizes"
 }
 
-postgres_preflight() {
+backend::preflight() {
     local needs_dump="$1"
     shift
     local tool version server_version allowed db owner pattern track_counts seen='|'
@@ -198,12 +198,12 @@ postgres_preflight() {
             return 1
         fi
     fi
-    server_version=$(pg_exec -d "$PG_MAINTENANCE_DB" -At -c 'SHOW server_version_num;') || return 1
+    server_version=$(backend::exec -d "$PG_MAINTENANCE_DB" -At -c 'SHOW server_version_num;') || return 1
     if [[ ! "$server_version" =~ ^18[0-9]{4}$ ]]; then
         echo "[ERROR] These runners require a PostgreSQL 18 server; got $server_version." >&2
         return 1
     fi
-    allowed=$(pg_exec -d "$PG_MAINTENANCE_DB" -At -c \
+    allowed=$(backend::exec -d "$PG_MAINTENANCE_DB" -At -c \
         'SELECT rolcanlogin AND (rolcreatedb OR rolsuper) FROM pg_catalog.pg_roles WHERE rolname = current_user;') || return 1
     if [[ "$allowed" != t ]]; then
         echo "[ERROR] Benchmark role requires LOGIN and CREATEDB." >&2
@@ -218,7 +218,7 @@ postgres_preflight() {
             return 1
         fi
         seen="$seen$db|"
-        owner=$(pg_exec -d "$PG_MAINTENANCE_DB" -At -c "
+        owner=$(backend::exec -d "$PG_MAINTENANCE_DB" -At -c "
             SELECT pg_has_role(current_user, datdba, 'USAGE')
             FROM pg_catalog.pg_database WHERE datname = '$db';") || return 1
         if [[ -n "$owner" && "$owner" != t ]]; then
@@ -226,20 +226,20 @@ postgres_preflight() {
             return 1
         fi
     done
-    track_counts=$(pg_exec -d "$PG_MAINTENANCE_DB" -At -c 'SHOW track_counts;') || return 1
+    track_counts=$(backend::exec -d "$PG_MAINTENANCE_DB" -At -c 'SHOW track_counts;') || return 1
     if [[ "$track_counts" != on ]]; then
         echo "[ERROR] track_counts must be on to collect table statistics." >&2
         return 1
     fi
     # Probe globals in the maintenance DB; it has no benchmark table yet.
-    collect_postgres_metrics "$PG_MAINTENANCE_DB" global || return 1
+    backend::collect_metrics "$PG_MAINTENANCE_DB" global || return 1
     echo "[INFO] PG18 preflight passed on $DB_HOST:$DB_PORT (server_version_num=$server_version)."
 }
 
-restore_comparison_database() {
+backend::dump_restore() {
     local source_rows restored_rows
     : > "$RESTORE_LOG"
-    source_rows=$(pg_exec -d "$DB_NAME" -At -c 'SELECT count(*) FROM usertable;') || return 1
+    source_rows=$(backend::exec -d "$DB_NAME" -At -c 'SELECT count(*) FROM usertable;') || return 1
     [[ "$source_rows" =~ ^[0-9]+$ ]] || return 1
     # A fresh target does not need --clean DROP statements. Keep dump/log on failure.
     if ! pg_cli pg_dump -d "$DB_NAME" > "$BACKUP_FILE" 2>> "$RESTORE_LOG"; then
@@ -248,11 +248,11 @@ restore_comparison_database() {
     fi
     pg_cli dropdb --maintenance-db="$PG_MAINTENANCE_DB" --if-exists "$BACKUP_DB_NAME" || return 1
     pg_cli createdb "$BACKUP_DB_NAME" || return 1
-    if ! pg_exec -d "$BACKUP_DB_NAME" -f "$BACKUP_FILE" >> "$RESTORE_LOG" 2>&1; then
+    if ! backend::exec -d "$BACKUP_DB_NAME" -f "$BACKUP_FILE" >> "$RESTORE_LOG" 2>&1; then
         echo "[ERROR] Restore failed; see $RESTORE_LOG. Dump retained at $BACKUP_FILE." >&2
         return 1
     fi
-    restored_rows=$(pg_exec -d "$BACKUP_DB_NAME" -At -c 'SELECT count(*) FROM usertable;') || return 1
+    restored_rows=$(backend::exec -d "$BACKUP_DB_NAME" -At -c 'SELECT count(*) FROM usertable;') || return 1
     if [[ "$restored_rows" != "$source_rows" ]]; then
         echo "[ERROR] Restore row count mismatch: source=$source_rows target=$restored_rows." >&2
         return 1
@@ -260,7 +260,7 @@ restore_comparison_database() {
     echo "[INFO] Restore verified: $restored_rows rows." >> "$RESTORE_LOG"
 }
 
-wait_for_idle_postgres() {
+backend::wait_idle() {
     local database="${1:-$DB_NAME}"
     local interval="${2:-20}"
     local timeout="${3:-1200}"
@@ -272,7 +272,7 @@ wait_for_idle_postgres() {
     started=$SECONDS
     while true; do
         # One row per non-idle backend, excluding this script's own connection.
-        active_backends=$(pg_exec -d "$database" -At -c \
+        active_backends=$(backend::exec -d "$database" -At -c \
             "SELECT backend_type, query, query_start, wait_event, state FROM pg_stat_activity WHERE state != 'idle' AND pid != pg_backend_pid();")
 
         # An empty result means idle. Do not count lines: printf '%s\n' "" | wc -l
@@ -290,14 +290,14 @@ wait_for_idle_postgres() {
         sleep "$interval"
     done
 }
-initialize_database() {
+backend::init_db() {
     local db_name="$1"
     log "Initializing PostgreSQL database $db_name..."
 
     pg_cli dropdb --maintenance-db="$PG_MAINTENANCE_DB" --if-exists "$db_name"
     pg_cli createdb "$db_name"
 
-    pg_exec -d "$db_name" -c \
+    backend::exec -d "$db_name" -c \
         "CREATE TABLE usertable (
             ycsb_key TEXT PRIMARY KEY,
             field0 TEXT[], field1 TEXT[], field2 TEXT[], field3 TEXT[], field4 TEXT[],
@@ -306,7 +306,7 @@ initialize_database() {
 
     log "Done initializing $db_name."
 }
-close_db() {
+backend::close() {
     log "PostgreSQL backend: no manual DB close required."
 }
 
@@ -329,14 +329,9 @@ supports_vacuum=1
 INFO
 }
 
+# pg_cli is a private helper of this module: it logs every operation without ever logging
+# its arguments, which can contain credentials.
 backend::cli() { pg_cli "$@"; }
-backend::exec() { pg_exec "$@"; }
-backend::preflight() { postgres_preflight "$@"; }
-backend::init_db() { initialize_database "$@"; }
-backend::collect_metrics() { collect_postgres_metrics "$@"; }
-backend::wait_idle() { wait_for_idle_postgres "$@"; }
-backend::dump_restore() { restore_comparison_database "$@"; }
-backend::close() { close_db "$@"; }
 
 # Sum of the ten text-array fields, i.e. the logical value size of a row. The engine
 # needs it both per key and as a total, so it lives here once instead of being
@@ -350,7 +345,7 @@ SQL
 # Total stored value size in $1 (database name).
 backend::total_size() {
     local db="${1:?database required}"
-    pg_exec -d "$db" -At -F',' -c \
+    backend::exec -d "$db" -At -F',' -c \
         "SELECT SUM($(backend::size_expression)) FROM usertable;"
 }
 
@@ -358,14 +353,14 @@ backend::total_size() {
 backend::key_sizes() {
     local db="${1:?database required}" out="${2:?output file required}"
     echo "ycsb_key,size" > "$out"
-    pg_exec -d "$db" -At -F',' -c \
+    backend::exec -d "$db" -At -F',' -c \
         "SELECT ycsb_key, $(backend::size_expression) AS size FROM usertable;" >> "$out"
 }
 
 # All keys currently stored, written to $2.
 backend::list_keys() {
     local db="${1:?database required}" out="${2:?output file required}"
-    pg_exec -d "$db" -At -F',' -c "SELECT ycsb_key FROM usertable;" > "$out"
+    backend::exec -d "$db" -At -F',' -c "SELECT ycsb_key FROM usertable;" > "$out"
 }
 
 # ---------------------------------------------------------------------------

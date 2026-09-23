@@ -243,5 +243,30 @@ eq "context requestdistribution" "${requestdistribution:-}" "zipfian"
 # An unknown phase must fail loudly instead of running YCSB with the wrong workload.
 workload::generate bogus-phase 1 >/dev/null 2>&1 && bad "unknown phase must fail" || ok
 
+# --- backend contract and engine hygiene --------------------------------------
+
+# shellcheck source=lib/registry.sh
+source "$SCRIPTS_DIR/lib/registry.sh"
+for backend in $(registry::available); do
+    if (set -euo pipefail; source "$BACKENDS_DIR/$backend.sh"; while read -r fn; do
+            declare -F "$fn" >/dev/null || { echo "missing $fn in $backend" >&2; exit 1; }
+        done < <(registry::required_functions)); then
+        ok
+    else
+        bad "backend $backend does not implement the contract (rc=$?)"
+    fi
+done
+
+# The engine must stay backend-independent: no PostgreSQL spellings, and no writes to
+# workload files (the two things that made the legacy scripts unmaintainable).
+engine_hygiene() {
+    local file="lib/lifecycle.sh" hits
+    hits=$(grep -nE '\b(pg_exec|pg_cli|collect_postgres_metrics|postgres_preflight|initialize_database|close_db|wait_for_idle_postgres|restore_comparison_database)\b' "$file") || true
+    [[ -z "$hits" ]] || { echo "engine calls backend internals: $hits" >&2; return 1; }
+    hits=$(grep -nE 'perl -i|>[[:space:]]*"?\$\{?WORKLOAD_FILE' "$file") || true
+    [[ -z "$hits" ]] || { echo "engine writes to a workload file: $hits" >&2; return 1; }
+}
+(cd "$SCRIPTS_DIR" && engine_hygiene) && ok || bad "engine hygiene (rc=$?)"
+
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$pass" "$fail"
 (( fail == 0 ))

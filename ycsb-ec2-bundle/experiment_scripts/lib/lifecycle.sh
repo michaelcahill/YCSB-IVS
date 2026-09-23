@@ -111,7 +111,7 @@ run_experiment() {
 # All read-only checks must finish before clearing outputs or dropping databases.
 start_logging
 log "START preflight"
-postgres_preflight true "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"
+backend::preflight true "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"
 workload::init
 log "END preflight"
 mkdir -p "$(dirname "$OUTPUT_FILE")" "$(dirname "$KEY_SIZE_FILE_AFTER_EXTEND")"
@@ -123,8 +123,8 @@ mkdir -p "$(dirname "$OUTPUT_FILE")" "$(dirname "$KEY_SIZE_FILE_AFTER_EXTEND")"
 rm -rf "$KEY_SIZE_LOG"
 rm -f "$KEY_SIZE_FILE_AFTER_EXTEND" "$KEY_SIZE_FILE_AFTER_RUN"
 
-initialize_database "$DB_NAME"
-initialize_database "$UNCHANGED_DB_NAME"
+backend::init_db "$DB_NAME"
+backend::init_db "$UNCHANGED_DB_NAME"
 
 # Execute the load phase
 log "=== Executing the load phase ==="
@@ -148,10 +148,10 @@ run_with_metrics "$DB_NAME" "$phase" "$step" "$OUTPUT_CSV" \
     -p db.passwd="$DB_PWD" \
     -p fieldlengthdistribution=constant \
     -p fieldlength="$fieldlengthoriginal"
-total_size_initial_load=$(pg_exec -d "$DB_NAME" -At -F"," -c "SELECT SUM(octet_length(coalesce(array_to_string(field0, ''), '')) + octet_length(coalesce(array_to_string(field1, ''), '')) + octet_length(coalesce(array_to_string(field2, ''), '')) + octet_length(coalesce(array_to_string(field3, ''), '')) + octet_length(coalesce(array_to_string(field4, ''), '')) + octet_length(coalesce(array_to_string(field5, ''), '')) + octet_length(coalesce(array_to_string(field6, ''), '')) + octet_length(coalesce(array_to_string(field7, ''), '')) + octet_length(coalesce(array_to_string(field8, ''), '')) + octet_length(coalesce(array_to_string(field9, ''), ''))) FROM usertable;")
+total_size_initial_load=$(backend::total_size "$DB_NAME")
 log "Initial-load verification - TotalSize:$total_size_initial_load ExpectedFieldLength:$fieldlengthoriginal"
 collect_cpu_memory_metrics
-collect_postgres_metrics $DB_NAME
+backend::collect_metrics $DB_NAME
 write_result "TRUE"
 
 # Load unchange value size (reference) DB
@@ -166,7 +166,7 @@ run_with_metrics "$UNCHANGED_DB_NAME" "$phase" "$step" "$OUTPUT_CSV" \
     -p db.passwd="$DB_PWD" \
     -p fieldlengthdistribution=constant \
     -p fieldlength="$fieldlengthoriginal"
-total_size_reference_load=$(pg_exec -d "$UNCHANGED_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(coalesce(array_to_string(field0, ''), '')) + octet_length(coalesce(array_to_string(field1, ''), '')) + octet_length(coalesce(array_to_string(field2, ''), '')) + octet_length(coalesce(array_to_string(field3, ''), '')) + octet_length(coalesce(array_to_string(field4, ''), '')) + octet_length(coalesce(array_to_string(field5, ''), '')) + octet_length(coalesce(array_to_string(field6, ''), '')) + octet_length(coalesce(array_to_string(field7, ''), '')) + octet_length(coalesce(array_to_string(field8, ''), '')) + octet_length(coalesce(array_to_string(field9, ''), ''))) FROM usertable;")
+total_size_reference_load=$(backend::total_size "$UNCHANGED_DB_NAME")
 log "Reference-load verification - TotalSize:$total_size_reference_load ExpectedFieldLength:$fieldlengthoriginal"
 
 # Experiment parameters
@@ -201,26 +201,12 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         fi
         
         collect_cpu_memory_metrics
-        collect_postgres_metrics $DB_NAME
+        backend::collect_metrics $DB_NAME
         write_result "FALSE"
 
         # Key Sizes
         log "Size computation started"
-        echo "ycsb_key,size" > "$KEY_SIZE_LOG"
-        pg_exec -d "$DB_NAME" -At -F"," \
-        -c "SELECT ycsb_key,
-            octet_length(coalesce(array_to_string(field0, ''), '')) +
-            octet_length(coalesce(array_to_string(field1, ''), '')) +
-            octet_length(coalesce(array_to_string(field2, ''), '')) +
-            octet_length(coalesce(array_to_string(field3, ''), '')) +
-            octet_length(coalesce(array_to_string(field4, ''), '')) +
-            octet_length(coalesce(array_to_string(field5, ''), '')) +
-            octet_length(coalesce(array_to_string(field6, ''), '')) +
-            octet_length(coalesce(array_to_string(field7, ''), '')) +
-            octet_length(coalesce(array_to_string(field8, ''), '')) +
-            octet_length(coalesce(array_to_string(field9, ''), '')) AS size
-            FROM usertable;" \
-        >> "$KEY_SIZE_LOG"
+        backend::key_sizes "$DB_NAME" "$KEY_SIZE_LOG"
         
         # Verify extend operations: check min, max, avg sizes to detect extension failures
         extend_stats=$(awk -F, '
@@ -271,7 +257,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
 
             log "START VACUUM ANALYZE database=$DB_NAME"
 
-            pg_exec -d "$DB_NAME" \
+            backend::exec -d "$DB_NAME" \
                 -c "VACUUM (ANALYZE, VERBOSE) public.usertable;" 2>&1 |
                 tee "$vacuum_detail" |
                 perl -ne '
@@ -305,14 +291,12 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         workload::apply_context "$WORKLOAD_PHASE"
 
         # Save the existing keys in the database
-        pg_exec -d "$DB_NAME" -At -F"," \
-        -c "SELECT ycsb_key
-            FROM usertable;" > keys_before_run.txt
+        backend::list_keys "$DB_NAME" keys_before_run.txt
 
         # Log query plan before run phase
         log "Checking query plan before run phase"
 
-        TEST_KEY=$(pg_exec -d "$DB_NAME" -At -c \
+        TEST_KEY=$(backend::exec -d "$DB_NAME" -At -c \
         "SELECT ycsb_key FROM usertable LIMIT 1;")
 
         {
@@ -322,7 +306,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             echo "Key=$TEST_KEY"
             echo "----------------------------------------"
 
-            pg_exec -d "$DB_NAME" -c "
+            backend::exec -d "$DB_NAME" -c "
             EXPLAIN (ANALYZE, BUFFERS)
             SELECT * FROM usertable WHERE ycsb_key = '$TEST_KEY';
             "
@@ -344,13 +328,11 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         -p fieldlengthhistogram="$HISTOGRAM_FILE"
 
         collect_cpu_memory_metrics
-        collect_postgres_metrics $DB_NAME
+        backend::collect_metrics $DB_NAME
         write_result "FALSE"
 
         # Save keys to remove duplicates later
-        pg_exec -d "$DB_NAME" -At -F"," \
-        -c "SELECT ycsb_key
-            FROM usertable;" > keys_after_run.txt
+        backend::list_keys "$DB_NAME" keys_after_run.txt
 
         # Sort both files
         sort keys_before_run.txt > keys_before_sorted.txt
@@ -363,16 +345,14 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         KEYS_TO_DELETE_FILE="$(pwd)/keys_to_delete.txt"
         while read key; do
             echo "DELETE FROM usertable WHERE ycsb_key='$key';"
-        done < "$KEYS_TO_DELETE_FILE" | pg_exec -d "$DB_NAME"
+        done < "$KEYS_TO_DELETE_FILE" | backend::exec -d "$DB_NAME"
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
 
-        pg_exec -d "$UNCHANGED_DB_NAME" -At -F"," \
-        -c "SELECT ycsb_key
-            FROM usertable;" > keys_before_run.txt
+        backend::list_keys "$UNCHANGED_DB_NAME" keys_before_run.txt
 
 		# wait for all backend processes to finish before doing clean run (max 20 mins)
-		wait_for_idle_postgres "$DB_NAME" 20 1200
+		backend::wait_idle "$DB_NAME" 20 1200
 
         # Reference workload with unchanging value sizes
         phase="reference"
@@ -388,13 +368,11 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         -p fieldlengthhistogram="$HISTOGRAM_FILE"
         
         collect_cpu_memory_metrics
-        collect_postgres_metrics $UNCHANGED_DB_NAME
+        backend::collect_metrics $UNCHANGED_DB_NAME
         write_result "FALSE"
 
         # Save keys to remove duplicates later
-        pg_exec -d "$UNCHANGED_DB_NAME" -At -F"," \
-        -c "SELECT ycsb_key
-            FROM usertable;" > keys_after_run.txt
+        backend::list_keys "$UNCHANGED_DB_NAME" keys_after_run.txt
 
         # Sort both files
         sort keys_before_run.txt > keys_before_sorted.txt
@@ -407,7 +385,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         KEYS_TO_DELETE_FILE="$(pwd)/keys_to_delete.txt"
         while read key; do
             echo "DELETE FROM usertable WHERE ycsb_key='$key';"
-        done < "$KEYS_TO_DELETE_FILE" | pg_exec -d "$UNCHANGED_DB_NAME"
+        done < "$KEYS_TO_DELETE_FILE" | backend::exec -d "$UNCHANGED_DB_NAME"
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
     
@@ -417,11 +395,11 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             
             log "Backing up the database started"
             RESTORE_LOG="./${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_step${step}_restore.log"
-            restore_comparison_database
+            backend::dump_restore
             log "Backing up the database finished"
 
 			# wait for all backend processes to finish before doing clean run (max 20 mins)
-			wait_for_idle_postgres "$DB_NAME" 20 1200
+			backend::wait_idle "$DB_NAME" 20 1200
 
 			WORKLOAD_PHASE="$(workload::generate clean-run "$iteration")"
                 workload::apply_context "$WORKLOAD_PHASE"
@@ -435,27 +413,13 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
                 -p fieldlengthhistogram="$HISTOGRAM_FILE"
                 
 			collect_cpu_memory_metrics
-            collect_postgres_metrics $BACKUP_DB_NAME
+            backend::collect_metrics $BACKUP_DB_NAME
             rm -rf "$BACKUP_FILE"
             write_result "FALSE"
 
             # Key Sizes
             log "Size computation started"
-            echo "ycsb_key,size" > "$KEY_SIZE_LOG"
-            pg_exec -d "$BACKUP_DB_NAME" -At -F"," \
-            -c "SELECT ycsb_key,
-                octet_length(coalesce(array_to_string(field0, ''), '')) +
-                octet_length(coalesce(array_to_string(field1, ''), '')) +
-                octet_length(coalesce(array_to_string(field2, ''), '')) +
-                octet_length(coalesce(array_to_string(field3, ''), '')) +
-                octet_length(coalesce(array_to_string(field4, ''), '')) +
-                octet_length(coalesce(array_to_string(field5, ''), '')) +
-                octet_length(coalesce(array_to_string(field6, ''), '')) +
-                octet_length(coalesce(array_to_string(field7, ''), '')) +
-                octet_length(coalesce(array_to_string(field8, ''), '')) +
-                octet_length(coalesce(array_to_string(field9, ''), '')) AS size
-                FROM usertable;" \
-            >> "$KEY_SIZE_LOG"
+            backend::key_sizes "$BACKUP_DB_NAME" "$KEY_SIZE_LOG"
             
             log "END size computation database=$BACKUP_DB_NAME"
 
@@ -477,19 +441,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             recordcount="$(workload::get_value "$WORKLOAD_PHASE" recordcount)"
 
             # PostgreSQL query to get the total size of all records
-            total_size=$(pg_exec -d "$BACKUP_DB_NAME" -At -F"," \
-            -c "SELECT SUM(
-                octet_length(coalesce(array_to_string(field0, ''), '')) +
-                octet_length(coalesce(array_to_string(field1, ''), '')) +
-                octet_length(coalesce(array_to_string(field2, ''), '')) +
-                octet_length(coalesce(array_to_string(field3, ''), '')) +
-                octet_length(coalesce(array_to_string(field4, ''), '')) +
-                octet_length(coalesce(array_to_string(field5, ''), '')) +
-                octet_length(coalesce(array_to_string(field6, ''), '')) +
-                octet_length(coalesce(array_to_string(field7, ''), '')) +
-                octet_length(coalesce(array_to_string(field8, ''), '')) +
-                octet_length(coalesce(array_to_string(field9, ''), ''))
-            ) FROM usertable;")
+            total_size=$(backend::total_size "$BACKUP_DB_NAME")
 
             # Set average field length
             if [ -z "$total_size" ] || [ -z "$recordcount" ] || [ "$recordcount" -eq 0 ]; then
@@ -506,19 +458,19 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             actual_fieldlength="$(workload::get_value "$WORKLOAD_PHASE" fieldlength)"
             log "Workload file fieldlength set to: $actual_fieldlength (expected: $fieldlengthaverage)"
 
-            pg_exec -d "$BACKUP_DB_NAME" \
+            backend::exec -d "$BACKUP_DB_NAME" \
             -c "TRUNCATE TABLE usertable;"
 
             # Resetting the database with new data load
             phase="comparison-load"
             log "=== Executing the load phase for the comparison study ==="
             run_ycsb "comparison-load" load "$YCSB_BINDING" -s -P "$WORKLOAD_PHASE" -P "$JDBC_PROPERTIES" -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD"
-            total_size_comparison_load=$(pg_exec -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(coalesce(array_to_string(field0, ''), '')) + octet_length(coalesce(array_to_string(field1, ''), '')) + octet_length(coalesce(array_to_string(field2, ''), '')) + octet_length(coalesce(array_to_string(field3, ''), '')) + octet_length(coalesce(array_to_string(field4, ''), '')) + octet_length(coalesce(array_to_string(field5, ''), '')) + octet_length(coalesce(array_to_string(field6, ''), '')) + octet_length(coalesce(array_to_string(field7, ''), '')) + octet_length(coalesce(array_to_string(field8, ''), '')) + octet_length(coalesce(array_to_string(field9, ''), ''))) FROM usertable;")
+            total_size_comparison_load=$(backend::total_size "$BACKUP_DB_NAME")
             log "Comparison-load verification - Epoch:$epoch Step:$step TotalSize:$total_size_comparison_load ExpectedFieldLength:$fieldlengthaverage"
 
             # Verify record sizes after avg-run load
             iteration=$((STEPS_PER_EPOCH*($epoch-1)+$step))
-            total_size_avg_run=$(pg_exec -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(coalesce(array_to_string(field0, ''), '')) + octet_length(coalesce(array_to_string(field1, ''), '')) + octet_length(coalesce(array_to_string(field2, ''), '')) + octet_length(coalesce(array_to_string(field3, ''), '')) + octet_length(coalesce(array_to_string(field4, ''), '')) + octet_length(coalesce(array_to_string(field5, ''), '')) + octet_length(coalesce(array_to_string(field6, ''), '')) + octet_length(coalesce(array_to_string(field7, ''), '')) + octet_length(coalesce(array_to_string(field8, ''), '')) + octet_length(coalesce(array_to_string(field9, ''), ''))) FROM usertable;")
+            total_size_avg_run=$(backend::total_size "$BACKUP_DB_NAME")
             log "Avg-run verification - Epoch:$epoch Step:$step Iteration:$iteration TotalSize:$total_size_avg_run ExpectedFieldLength:$fieldlengthaverage"
             
             # The avg-run compares at the original value size again.
@@ -526,7 +478,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             workload::apply_context "$WORKLOAD_PHASE"
 
 			# wait for all backend processes to finish before doing clean run (max 20 mins)
-			wait_for_idle_postgres "$DB_NAME" 20 1200
+			backend::wait_idle "$DB_NAME" 20 1200
 
             # Execute the run phase
             log "Preparing run workload: read=$readproportion update=$updateproportion extend=$extendproportion"
@@ -540,7 +492,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
                 -p db.passwd="$DB_PWD"
 
             collect_cpu_memory_metrics
-            collect_postgres_metrics $BACKUP_DB_NAME
+            backend::collect_metrics $BACKUP_DB_NAME
             write_result "FALSE"
         fi
         log "END iteration"

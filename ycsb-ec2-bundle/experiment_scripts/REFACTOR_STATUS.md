@@ -1,7 +1,11 @@
 # Refactor Status — experiment scripts
 
 Plan: [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) · Branch: `refactor/experiment-scripts`
-Last updated: **steps 1–4 complete** — one runner (`experiment.sh <backend>`), PostgreSQL backend module + registry + layered config, and **workload files are now read-only templates** (per-phase files generated into the experiment directory). Goldens identical apart from the intended `-P` paths.
+Last updated: **steps 1–4 complete, plus the engine half of step 5** — one runner
+(`experiment.sh <backend>`), a PostgreSQL backend module whose only interface is `backend::*`,
+a layered config layer with a legacy-launcher alias shim, and **workload files are read-only
+templates** (one generated file per phase in the experiment directory). Goldens unchanged apart
+from the intended `-P` paths.
 
 Read this file first after an interruption. Append to the **Log** at every meaningful
 checkpoint, and keep the **Step status** table current.
@@ -53,7 +57,7 @@ work directory is kept for inspection.
 | 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ✅ done | PG backend module (387 ln) with `backend::*` contract + legacy aliases; `lib/registry.sh` discovers and validates backends; `experiment.sh` is the single entry point; authoritative script is now a compatibility shim |
 | 3 | `config.sh` + `conf/` presets + alias shim + `--help/--dry-run/--list-backends` | DONE | layered config with `${VAR:-default}` everywhere and `config::derive_paths` last; flags `--var/--config/--epochs/--steps/--run-id/--type/--scale/--workload/--experiment-dir/--dry-run/--list-backends`; legacy alias shim (`DIST`, `WORK`, `UNCHANGE_DB_NAME`, `EXPERIMENT_EPOCHS`, `EXPERIMENT_RUNS_PER_EPOCH`, `DB_PASSWORD`, `FIELD_LENGTH_ORIGINAL`, `vacuum`, `EXTEND_*`/`RUN_*` proportions) with deprecation lines; `conf/scale.{heavy,light}.env`; 31 assertions in `tests/test_config_workload.sh`. `--mode baseline` / `--instrument` still rejected until steps 6 and 8b |
 | 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | DONE | `lib/workload.sh`: one immutable, provenance-tagged file per YCSB invocation; the 22 in-place `perl -i -p` rewrites and the `awk` strip are gone from `lib/lifecycle.sh`; preflight no longer needs a writable workload; smoke asserts `../workloads` stays clean and that all 8 phase files exist |
-| 5 | `lifecycle.sh` engine + backend ports (PG row → postgrenosql → mariadb ×2 → mongodb → neo4j → couchbase) | ⬜ pending | only PG-family can be verified locally; others have no server here |
+| 5 | `lifecycle.sh` engine + backend ports (PG row -> postgrenosql -> mariadb x2 -> mongodb -> neo4j -> couchbase) | IN PROGRESS | **engine half done:** `lib/lifecycle.sh` drives only `backend::*`, the PostgreSQL legacy aliases are deleted, and a hygiene test fails if either regresses. Remaining backends cannot be verified on this machine (no servers). |
 | 6 | `--mode baseline`; delete legacy `*_baseline.sh` | ⬜ pending | |
 | 7 | `tools/bundle.sh`, `tools/deploy.sh`, README rewrite, gitignore | ⬜ pending | |
 | 8a | `postgresql_json` backend | ⬜ pending | |
@@ -64,15 +68,12 @@ Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked
 
 ## Where to resume
 
-Steps 3 and 4 are complete. Next up is **step 5**: move the engine onto the backend
-contract and port the remaining backends.
+Steps 3, 4 and the engine half of step 5 are complete: `lib/lifecycle.sh` calls nothing but
+`backend::*`, the PostgreSQL module's legacy aliases are gone, and the inline 34x value-size
+SQL is replaced by `backend::key_sizes` / `total_size` / `list_keys`. Next up is **step 5b**:
+port the remaining backends.
 
-1. Step 5a: in `lib/lifecycle.sh`, replace the legacy PostgreSQL names (`pg_exec`,
-   `collect_postgres_metrics`, `postgres_preflight`, `restore_comparison_database`,
-   `wait_for_idle_postgres`, `initialize_database`, `close_db`) with their `backend::*`
-   equivalents, and use the still-unused `backend::key_sizes` / `total_size` / `list_keys`
-   instead of the inline 34x size SQL; then delete the aliases from the backend module.
-2. Step 5b: add backends one at a time (`postgresql_row` -> `postgrenosql` ->
+1. Step 5b: add backends one at a time (`postgresql_row` -> `postgrenosql` ->
    `mariadb_innodb` -> `mariadb_rocksdb` -> `mongodb` -> `neo4j` -> `couchbase`) and retire
    each legacy script as an `exec` shim; retarget `tests/test_postgresql_array_pg18.py`,
    which still points at `experiment_postgresql_array.sh`.
@@ -205,6 +206,19 @@ Facts that save time when resuming:
 - EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.
 
 ## Log
+
+### 2026-09-24 — step 5 (engine half): contract only, aliases deleted
+
+- `lib/lifecycle.sh` now calls exclusively `backend::preflight/init_db/exec/collect_metrics/
+  wait_idle/dump_restore/total_size/key_sizes/list_keys`; the 34x duplicated value-size SQL
+  and the per-phase key listings are gone (engine -78/+30 lines).
+- `lib/backends/postgresql_textarray.sh`: implementations renamed into the contract names and
+  the eight wrapper/alias functions deleted; only the private `pg_cli` helper remains.
+- New regression guard in `tests/test_config_workload.sh`: every backend must implement the
+  contract, and `lib/lifecycle.sh` must contain neither PostgreSQL function names nor any
+  write to `$WORKLOAD_FILE`. Verified the guard fails when either is violated.
+- Suite unchanged otherwise: static checks PASS - 33 shell + 7 python tests OK - smoke PASS
+  against the same goldens (no golden update needed for this step).
 
 ### 2026-09-24 — steps 3 and 4 complete
 

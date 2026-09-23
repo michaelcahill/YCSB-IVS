@@ -20,7 +20,7 @@ step() { printf '\n=== %s ===\n' "$*"; }
 step "static checks"
 bash tools/check_scripts.sh
 
-step "shell unit tests (config, workload generation)"
+step "shell unit tests (config, workloads, backend contract)"
 if bash tests/test_config_workload.sh; then
     :
 else
