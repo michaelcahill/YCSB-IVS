@@ -78,6 +78,16 @@ WLEOF
 export WORKLOAD_FILE="$WORKLOAD"
 export EXPERIMENT_DIR="$WORKDIR/experiment"
 
+# Start from a known database state: leftover smoke databases change the runner's
+# output (dropdb emits "NOTICE: database ... does not exist, skipping" only when the
+# database is absent), which would make the goldens depend on history.
+echo "[smoke] dropping any leftover smoke databases"
+for db in "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"; do
+    PGPASSWORD="$DB_PWD" PGCONNECT_TIMEOUT=10 psql -h "$DB_HOST" -p "$DB_PORT" \
+        -U "$DB_USERNAME" -d "$PG_MAINTENANCE_DB" -q -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE);" >/dev/null 2>&1 \
+        || echo "[smoke] warning: could not drop $db"
+done
+
 echo "[smoke] target=$TARGET_SCRIPT"
 echo "[smoke] database=$DB_HOST:$DB_PORT user=$DB_USERNAME (dbs: $DB_NAME, $UNCHANGED_DB_NAME, $BACKUP_DB_NAME)"
 echo "[smoke] workdir=$WORKDIR"
@@ -108,7 +118,11 @@ normalize_log() {
 # Keep the structural log lines: everything emitted by the runner's own log()
 # plus its two unmarked progress echoes. YCSB's own chatter is excluded.
 markers_only() {
-    grep -E '\[epoch=|Starting metrics collection for |Finished [^ ]+ phase=' "$1" || true
+    # "WAITING FOR IDLE POSTGRES" lines appear only when the server happens to be
+    # busy (autovacuum/checkpointer from earlier runs), so they are environment
+    # noise; the START/END WAIT pair around them is kept.
+    grep -E '\[epoch=|Starting metrics collection for |Finished [^ ]+ phase=' "$1" \
+        | grep -v 'WAITING FOR IDLE POSTGRES' || true
 }
 
 normalize_stderr() {

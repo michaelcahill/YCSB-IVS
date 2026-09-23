@@ -9,6 +9,16 @@ export PATH="$YCSB_HOME/bin:$PATH"
 
 YCSB="../bin/ycsb.sh"
 
+# Core behaviour lives in lib/ so every backend shares one implementation.
+# shellcheck source=lib/metrics.sh
+source "$SCRIPT_DIR/lib/metrics.sh"
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
+# shellcheck source=lib/results.sh
+source "$SCRIPT_DIR/lib/results.sh"
+# shellcheck source=lib/keysizes.sh
+source "$SCRIPT_DIR/lib/keysizes.sh"
+
 # DB names
 DB_NAME="${DB_NAME:-ycsb}"
 BACKUP_DB_NAME="${BACKUP_DB_NAME:-ycsb_backup}"
@@ -101,37 +111,6 @@ extendoperationcount="${EXTEND_OPERATIONCOUNT:-100000}"
 PG_MAINTENANCE_DB="${PG_MAINTENANCE_DB:-postgres}"
 
 # PG18 statistics collection
-global_metric_names=(
-    blks_read blks_hit tup_returned tup_fetched tup_inserted tup_updated
-    tup_deleted deadlocks temp_files temp_bytes checkpoints_timed checkpoints_req
-    checkpoints_done buffers_checkpoint buffers_clean buffers_alloc
-    checkpoint_write_time checkpoint_sync_time wal_bytes wal_records wal_fpi wal_buffers_full
-)
-
-table_metric_names=(
-    n_tup_upd n_live_tup n_dead_tup n_ins_since_vacuum vacuum_count autovacuum_count
-    total_vacuum_time total_autovacuum_time total_analyze_time total_autoanalyze_time
-)
-
-relsize_metric_names=(
-    relation_name relation_type raw_rel_size relation_size
-)
-
-binding_field_names=("${global_metric_names[@]}")
-
-for prefix in usertable toast; do
-    for metric in "${table_metric_names[@]}"; do
-        binding_field_names+=("${prefix}_${metric}")
-    done
-done
-
-binding_field_names+=(toast_n_tup_ins toast_n_tup_del)
-
-binding_field_names+=(
-    usertable_heap_blks_read usertable_heap_blks_hit usertable_idx_blks_read usertable_idx_blks_hit
-    toast_blks_read toast_blks_hit tidx_blks_read tidx_blks_hit
-)
-
 pg_cli() {
     local tool="$1"
     shift
@@ -159,10 +138,6 @@ pg_exec() {
     pg_cli psql -X -q -v ON_ERROR_STOP=1 "$@"
 }
 
-collect_cpu_memory_metrics() {
-    cpu=$(ps -u postgres -o %cpu= | awk '{sum += $1} END {print sum + 0}')
-    memory=$(ps -u postgres -o %mem= | awk '{sum += $1} END {print sum + 0}')
-}
 
 collect_postgres_metrics() {
     local db="${1:-$DB_NAME}"
@@ -384,109 +359,8 @@ restore_comparison_database() {
     echo "[INFO] Restore verified: $restored_rows rows." >> "$RESTORE_LOG"
 }
 # End local PG18 support functions.
-stats_header="CPU,Memory,$(IFS=','; echo "${binding_field_names[*]}")"
 
 
-# stderr keeps diagnostics out of captured SQL results and raw YCSB CSV.
-log() {
-    case "$*" in
-        "START experiment "*|"END experiment "*|\
-        "START preflight"|"END preflight"|\
-        "START statistics"*|"END statistics"*|"DB statistics"*|\
-        "START YCSB "*|"END YCSB "*|\
-        "START VACUUM"*|"END VACUUM"*|\
-        "START WAIT"*|"END WAIT"*|"TIMEOUT WAIT"*|"WAITING"*|\
-        "Initializing PostgreSQL database "*|"Done initializing "*|\
-        "Backing up the database started"|"Backing up the database finished"|\
-        "Log file: "*|"Result CSV: "*|"Download this log from EC2: "*|\
-        *ERROR*|*WARNING*|Warning:*)
-            printf '[epoch=%s run=%s phase=%s] %s\n' \
-                "${epoch:-0}" "${step:-0}" "${phase:-setup}" "$*" >&2
-            ;;
-        *)
-            return 0
-            ;;
-    esac
-}
-
-start_logging() {
-    EXECUTION_ID="${EXECUTION_ID:-$(date -u +%Y%m%dT%H%M%SZ)_$$}"
-
-    mkdir -p "$(dirname "$LOG_FILE")"
-    LOG_FILE="$(cd "$(dirname "$LOG_FILE")" && pwd)/$(basename "$LOG_FILE")"
-    : > "$LOG_FILE"
-
-    LOGGER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ycsb-logger.XXXXXX")
-    if ! mkfifo "$LOGGER_DIR/stream"; then
-        rmdir "$LOGGER_DIR"
-        return 1
-    fi
-
-    # Save the original terminal output descriptors.
-    exec 3>&1 4>&2
-
-    # Start the reader BEFORE redirecting the script's output.
-    (
-        trap - EXIT ERR INT TERM
-        set -o pipefail
-
-        perl -MPOSIX=strftime -ne '
-            BEGIN { $| = 1; }
-            print strftime("[%Y-%m-%d %H:%M:%S UTC] ", gmtime), $_;
-        ' < "$LOGGER_DIR/stream" | tee -a "$LOG_FILE"
-    ) &
-    LOGGER_PID=$!
-
-    EXPERIMENT_STARTED=$SECONDS
-    EXPERIMENT_COMPLETED=0
-
-    exec > "$LOGGER_DIR/stream" 2>&1
-
-    trap 'log "ERROR status=$? line=$LINENO"' ERR
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    trap 'finish_logging "$?"' EXIT
-
-    log "START experiment execution=$EXECUTION_ID host=$DB_HOST port=$DB_PORT"
-    log "Log file: $LOG_FILE"
-    log "Result CSV: $OUTPUT_FILE"
-}
-
-finish_logging() {
-    local rc="$1"
-    local logger_rc=0
-
-    trap - EXIT ERR INT TERM
-
-    # Safety net: never leave a watcher behind, whatever killed the run.
-    stop_runtime_watcher
-
-    # Prevent premature exits from being reported as successful.
-    if (( rc == 0 )) && [[ "${EXPERIMENT_COMPLETED:-0}" != 1 ]]; then
-        rc=1
-        log "ERROR experiment exited before its completion marker"
-    fi
-
-    log "END experiment status=$rc duration=$((SECONDS-EXPERIMENT_STARTED))s"
-    log "Download this log from EC2: $LOG_FILE"
-
-    # Close the pipe's writer, then wait for the logger to finish.
-    exec 1>&3 2>&4 3>&- 4>&-
-    wait "$LOGGER_PID" || logger_rc=$?
-
-    rm -f "$LOGGER_DIR/stream"
-    rmdir "$LOGGER_DIR"
-
-    if (( logger_rc != 0 )); then
-        printf 'Log writer failed (status=%s): %s\n' \
-            "$logger_rc" "$LOG_FILE" >&2
-        if (( rc == 0 )); then
-            rc=$logger_rc
-        fi
-    fi
-
-    exit "$rc"
-}
 
 wait_for_idle_postgres() {
     local database="${1:-$DB_NAME}"
@@ -616,18 +490,7 @@ run_with_metrics() {
     return 0
 }
 
-# Stops the watcher process group started by run_with_metrics. Global state and
-# always successful: it is called from EXIT/INT/TERM traps, where a non-zero
 # status would abort cleanup and a function-local pid would be out of scope.
-RUNTIME_WATCHER_PGID=""
-stop_runtime_watcher() {
-    local pid="${RUNTIME_WATCHER_PGID:-}"
-    RUNTIME_WATCHER_PGID=""
-    [[ -n "$pid" ]] || return 0
-    kill -TERM -"$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-    return 0
-}
 
 # Initialize PostgreSQL database
 initialize_database() {
@@ -648,138 +511,15 @@ initialize_database() {
 }
 
 # Function to write results as a csv 
-write_result() {
-    local first="$1" field_name postgres_stats_csv base_header previous temp_result r
-    local -a postgres_stats=("$cpu" "$memory")
-    for field_name in "${binding_field_names[@]}"; do
-        postgres_stats+=("${!field_name}")
-    done
-    postgres_stats_csv=$(IFS=','; echo "${postgres_stats[*]}")
-    r=$((STEPS_PER_EPOCH * (${epoch:-1} - 1) + ${step:-0}))
-    [[ "$phase" != load ]] || r=0
-    base_header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,$stats_header,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec)"
-    previous="$OUTPUT_FILE"
-    [[ "$first" != TRUE ]] || previous=/dev/null
-    temp_result=$(mktemp "${OUTPUT_FILE}.tmp.XXXXXX")
-    log "START CSV write database statistics phase=$phase"
-    if ! awk -F, -v OFS=, -v base="$base_header" -v previous="$previous" \
-        -v step="$r" -v phase="$phase" -v records="${recordcount:-}" \
-        -v allfields="${readallfields:-}" -v distribution="${requestdistribution:-}" \
-        -v readdist="${readrequestdistribution:-}" -v updatedist="${updaterequestdistribution:-}" \
-        -v stats="$postgres_stats_csv" -v readprop="${readproportion:-}" \
-        -v updateprop="${updateproportion:-}" -v scanprop="${scanproportion:-}" \
-        -v insertprop="${insertproportion:-}" -v extendprop="${extendproportion:-}" '
-        function trim(x) { sub(/^[[:space:]]+/, "", x); sub(/[[:space:]]+$/, "", x); return x }
-        BEGIN { base_count=split(base, base_fields, ",") }
-        FILENAME == previous {
-            if (FNR == 1) {
-                for (i=base_count+1; i<=NF; i++) { labels[++nlabels]=$i; known[$i]=1 }
-                old_width=NF
-            } else { old[++nold]=$0 }
-            next
-        }
-        /^\[(OVERALL|INSERT|READ|UPDATE|SCAN|EXTEND|READ-MODIFY-WRITE)\],/ {
-            op=trim($1); gsub(/[][]/, "", op)
-            label=trim($2); value=trim($3)
-            if (op == "OVERALL") { overall[label]=value; next }
-            if (!(op in seen)) { operations[++nops]=op; seen[op]=1 }
-            if (!(label in known)) { labels[++nlabels]=label; known[label]=1 }
-            measurements[op,label]=value
-        }
-        END {
-            if (!nops || !("RunTime(ms)" in overall) || !("Throughput(ops/sec)" in overall)) {
-                print "[ERROR] Missing YCSB operation/overall metrics; CSV left unchanged." > "/dev/stderr"
-                exit 1
-            }
-            printf "%s", base
-            for (i=1; i<=nlabels; i++) printf ",%s", labels[i]
-            printf "\n"
-            for (j=1; j<=nold; j++) {
-                printf "%s", old[j]
-                for (i=old_width+1; i<=base_count+nlabels; i++) printf ","
-                printf "\n"
-            }
-            for (j=1; j<=nops; j++) {
-                op=operations[j]; dist=distribution
-                if (op == "READ" && readdist != "") dist=readdist
-                if (op == "UPDATE" && updatedist != "") dist=updatedist
-                printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s", \
-                    step, phase, records, allfields, dist, op, stats, readprop, updateprop, \
-                    scanprop, insertprop, extendprop, overall["RunTime(ms)"], overall["Throughput(ops/sec)"]
-                for (i=1; i<=nlabels; i++) printf ",%s", measurements[op,labels[i]]
-                printf "\n"
-            }
-        }
-    ' "$previous" "$INPUT_FILE" > "$temp_result"; then
-        rm -f "$temp_result"
-        return 1
-    fi
-    mv "$temp_result" "$OUTPUT_FILE"
-    log "END CSV write output=$OUTPUT_FILE"
-}
 
 # Function to close the PostgreSQL database
 close_db() {
     log "PostgreSQL backend: no manual DB close required."
 }
 
-# Function to append values for the first iteration
-append_first_iteration() {
-    local key_size_log="$1"
-    local key_size_file="$2"
-
-    log "Appending first iteration..."
-    awk -F, 'NR==1 {next} {print $1 "," $2}' "$key_size_log" >> "$key_size_file"
-    log "First iteration: Appended values from $key_size_log to $key_size_file"
-}
 
 # Function to append sizes for subsequent iterations
-append_subsequent_iterations() {
-    local key_size_log="$1"
-    local key_size_file="$2"
 
-    log "Appending subsequent iteration $iteration..."
-    awk -F, -v iter="$iteration" '
-        NR==FNR {if (NR > 1) {key_sizes[$1]=$2;} next}  # Read key_sizes from log
-        FNR==1 {print $0 ",Run" iter; next}             # Add new run column in the header
-        ($1 in key_sizes) {print $0 "," key_sizes[$1]}  # Append size for existing key
-        !($1 in key_sizes) {print $0 ",0"}              # If key is not found, append 0
-    ' "$key_size_log" "$key_size_file" > temp.csv
-
-    mv temp.csv "$key_size_file"  # Overwrite the file with updated content
-    log "Iteration $iteration: Appended new size values from $key_size_log to $key_size_file"
-}
-
-# Generate histogram from key size log
-get_key_sizes() {
-    local key_size_log="$1"
-    local histogram_file="$2"
-
-    log "Generating histogram from key size log: $key_size_log"
-
-    awk -F, '
-        BEGIN {
-            block = 100
-            OFS = "\t"
-        }
-        NR == 1 { next }  # Skip header
-        {
-            size = $2 + 0
-            bucket = int(size / (block * 10 ))   #Converting value length to field length as there are 10 fields
-            histogram[bucket]++
-            if (bucket > max_bucket) max_bucket = bucket
-        }
-        END {
-            print "BlockSize", block > "'"$histogram_file"'"
-            for (i = 0; i <= max_bucket; i++) {
-                count = (i in histogram) ? histogram[i] : 0
-                print i, count >> "'"$histogram_file"'"
-            }
-        }
-    ' "$key_size_log"
-
-    log "Histogram written to $histogram_file (BlockSize = 100)"
-}
 
 # All read-only checks must finish before clearing outputs or dropping databases.
 start_logging

@@ -9,8 +9,10 @@
 [<TIMESTAMP>] [INFO] PG18 preflight passed on 127.0.0.1:<N> (server_version_num=<N>).
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] END preflight
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] Initializing PostgreSQL database ycsb_smoke...
+[<TIMESTAMP>] NOTICE:  database "ycsb_smoke" does not exist, skipping
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] Done initializing ycsb_smoke.
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] Initializing PostgreSQL database ycsb_smoke_unch...
+[<TIMESTAMP>] NOTICE:  database "ycsb_smoke_unch" does not exist, skipping
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] Done initializing ycsb_smoke_unch.
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke
 [<TIMESTAMP>] [epoch=0 run=0 phase=load] START YCSB load
@@ -88,6 +90,7 @@
 [<TIMESTAMP>] [epoch=1 run=1 phase=reference] DB statistics <METRICS>
 [<TIMESTAMP>] [epoch=1 run=1 phase=reference] END statistics snapshot database=ycsb_smoke_unch statistics=<N> relsizes=<N>
 [<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] Backing up the database started
+[<TIMESTAMP>] NOTICE:  database "ycsb_smoke_bak" does not exist, skipping
 [<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] Backing up the database finished
 [<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] START WAIT FOR IDLE POSTGRES database=ycsb_smoke
 [<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s

@@ -1,7 +1,7 @@
 # Refactor Status — experiment scripts
 
 Plan: [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) · Branch: `refactor/experiment-scripts`
-Last updated: **step 0 complete** — bugs fixed, smoke goldens captured, test suite green
+Last updated: **step 1 complete** — core extracted into `lib/`, smoke goldens unchanged, suite green
 
 Read this file first after an interruption. Append to the **Log** at every meaningful
 checkpoint, and keep the **Step status** table current.
@@ -48,7 +48,8 @@ work directory is kept for inspection.
 | # | Step | Status | Notes |
 | --- | --- | --- | --- |
 | 0 | Fix §10 bugs; capture smoke goldens; add CI checks | ✅ done | all four §10 bugs fixed and verified against real PG 18 + real YCSB; `tools/check_scripts.sh`, `tests/run_tests.sh`, `tests/smoke_authoritative.sh` + goldens added; stale mock test repaired (7 tests OK) |
-| 1 | Port core into `lib/{common,metrics,results,keysizes}.sh` | ⬜ pending | start here |
+| 1 | Port core into `lib/{common,metrics,results,keysizes}.sh` | ✅ done | runner 1253 → 1022 lines; libs = common 119, results 75, keysizes 61, metrics 48. Function + top-level-name inventories verified identical to `HEAD` (nothing lost/duplicated); smoke goldens unchanged |
+| 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ⏳ in progress | start here: move the PG18 support block (pg_cli/pg_exec/collect_postgres_metrics/postgres_preflight/restore_comparison_database/wait_for_idle_postgres/initialize_database/close_db + size SQL) into the backend, then add the dispatcher and retarget `tests/test_postgresql_array_pg18.py` (it still points at `experiment_postgresql_array.sh`) |
 | 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ⬜ pending | |
 | 3 | `config.sh` + `conf/` presets + alias shim + `--help/--dry-run/--list-backends` | ⬜ pending | |
 | 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | ⬜ pending | unit-testable without any DB |
@@ -60,6 +61,25 @@ work directory is kept for inspection.
 | 8c | Delete remaining shims/legacy scripts | ⬜ pending | **gate:** only after user confirms on EC2 hardware |
 
 Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked
+
+## Findings during step 1
+
+1. **Smoke goldens were not deterministic.** Two sources found and fixed:
+   * leftover smoke databases changed the runner's output (`dropdb --if-exists` only
+     emits its NOTICE when the database is absent) → the suite now drops the three smoke
+     databases before every run;
+   * `WAITING FOR IDLE POSTGRES` lines appear only when the server happens to be busy with
+     autovacuum/checkpoint work from earlier runs → filtered out of the golden markers
+     (the surrounding `START/END WAIT` pair is still compared).
+   Verified with 4 consecutive compare runs, all PASS.
+2. **`tests/test_postgresql_array_pg18.py` still targets `experiment_postgresql_array.sh`,**
+   not the authoritative script, so it was unaffected by step 1. It must be retargeted in
+   step 2 when that sibling becomes a shim over the shared backend.
+3. Extraction is otherwise mechanical: `log`, `start_logging`, `finish_logging`,
+   `stop_runtime_watcher` → `lib/common.sh`; metric arrays + `collect_cpu_memory_metrics` +
+   `stats_header` → `lib/metrics.sh`; `write_result` → `lib/results.sh`;
+   `append_first_iteration`, `append_subsequent_iterations`, `get_key_sizes` →
+   `lib/keysizes.sh`. The runner sources them right after computing `SCRIPT_DIR`.
 
 ## Findings during step 0 (beyond the plan)
 
@@ -113,6 +133,15 @@ Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked
 - EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.
 
 ## Log
+
+### 2026-09-23 — step 1 complete
+
+- Created `lib/{common,metrics,results,keysizes}.sh`; the authoritative runner sources them
+  and shrank from 1253 to 1022 lines. Function and top-level-name inventories diffed against
+  `HEAD`: identical.
+- Made the smoke suite deterministic (pre-clean smoke databases; filter idle-wait chatter);
+  goldens re-captured, then 4 consecutive compare runs PASS.
+- Suite: static checks PASS · 7 python tests OK · smoke PASS.
 
 ### 2026-09-23 — step 0 complete
 
