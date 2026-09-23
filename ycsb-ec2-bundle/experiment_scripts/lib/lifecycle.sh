@@ -33,16 +33,19 @@ run_ycsb() {
 }
 
 # Point the binding at one database. The property NAMES are a binding detail: the JDBC
-# bindings read db.url/db.user/db.passwd, PostgreNoSQL reads postgrenosql.url/…, so the
-# prefix is configured per backend (BINDING_PARAM_PREFIX) instead of hardcoded here.
-# Sets the global DB_PARAMS array; every YCSB invocation expands it.
+# bindings read db.url/db.user/db.passwd, PostgreNoSQL reads postgrenosql.url/…, and MongoDB
+# has no credential properties at all (everything is in the URI), so BINDING_PARAM_PREFIX and
+# BINDING_PARAM_CREDENTIALS come from the backend. Sets the global DB_PARAMS array; every YCSB
+# invocation expands it.
 binding_db_params() {
     local url="${1:?database url required}" prefix="${BINDING_PARAM_PREFIX:-db}"
-    DB_PARAMS=(
-        -p "${prefix}.url=$url"
-        -p "${prefix}.user=$DB_USERNAME"
-        -p "${prefix}.passwd=$DB_PWD"
-    )
+    DB_PARAMS=(-p "${prefix}.url=$url")
+    if [[ "${BINDING_PARAM_CREDENTIALS:-1}" == 1 ]]; then
+        DB_PARAMS+=(
+            -p "${prefix}.user=$DB_USERNAME"
+            -p "${prefix}.passwd=$DB_PWD"
+        )
+    fi
 }
 
 run_with_metrics() {

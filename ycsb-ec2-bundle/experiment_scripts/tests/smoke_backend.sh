@@ -22,7 +22,11 @@ BACKEND="${1:-${BACKEND:?usage: smoke_backend.sh <backend>}}"
 
 # Endpoint and role come from the backend's own defaults, so this script must not set them;
 # export DB_HOST/DB_PORT/DB_USERNAME to point a run somewhere else.
-export DB_PWD="${DB_PWD:?Set DB_PWD to the benchmark role password}"
+# Some deployments have no password (MongoDB in its default configuration authenticates through
+# the URI at most), so an empty DB_PWD is allowed - with a warning for the credential-carrying
+# backends, whose preflight will fail loudly anyway.
+export DB_PWD="${DB_PWD-}"
+[[ -n "$DB_PWD" ]] || echo "[backend-smoke] note: DB_PWD is empty; that is only fine for a backend without credentials"
 
 # Dedicated databases so a smoke run can never destroy an experiment.
 suffix="_smoke_$(basename "$BACKEND" | tr -cd 'a-z0-9' | cut -c1-8)"

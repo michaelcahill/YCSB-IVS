@@ -24,5 +24,11 @@ collect_cpu_memory_metrics() {
 metrics::header() {
     local -a names=()
     mapfile -t names < <(backend::metric_names)
-    printf 'CPU,Memory,%s\n' "$(IFS=','; echo "${names[*]}")"
+    # A backend may report no database statistics at all (MongoDB). The two OS columns are
+    # always there, and an empty list must not add a nameless column to the CSV.
+    if (( ${#names[@]} == 0 )); then
+        printf 'CPU,Memory\n'
+    else
+        printf 'CPU,Memory,%s\n' "$(IFS=','; echo "${names[*]}")"
+    fi
 }
