@@ -23,10 +23,10 @@ BACKEND="${1:-${BACKEND:?usage: smoke_backend.sh <backend>}}"
 # Endpoint and role come from the backend's own defaults, so this script must not set them;
 # export DB_HOST/DB_PORT/DB_USERNAME to point a run somewhere else.
 # Some deployments have no password (MongoDB in its default configuration authenticates through
-# the URI at most), so an empty DB_PWD is allowed - with a warning for the credential-carrying
-# backends, whose preflight will fail loudly anyway.
-export DB_PWD="${DB_PWD-}"
-[[ -n "$DB_PWD" ]] || echo "[backend-smoke] note: DB_PWD is empty; that is only fine for a backend without credentials"
+# the URI at most), so an unset DB_PWD is allowed - with a warning for the credential-carrying
+# backends, whose preflight will fail loudly anyway. It is deliberately NOT exported when empty:
+# exporting it would claim the environment layer and silently win over conf/db.<backend>.env.
+[[ -n "${DB_PWD-}" ]] || echo "[backend-smoke] note: DB_PWD is not set; expecting conf/db.$BACKEND.env or a backend without credentials"
 
 # Dedicated databases so a smoke run can never destroy an experiment.
 suffix="_smoke_$(basename "$BACKEND" | tr -cd 'a-z0-9' | cut -c1-8)"
@@ -77,7 +77,7 @@ DB_DIALECT="$(registry::info runtime_watcher_dialect)"
 
 if [[ "$DB_DIALECT" == postgresql ]] && command -v dropdb >/dev/null 2>&1; then
     for db in "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"; do
-        PGPASSWORD="$DB_PWD" dropdb --if-exists --host="${DB_HOST:-127.0.0.1}" \
+        PGPASSWORD="${DB_PWD:-}" dropdb --if-exists --host="${DB_HOST:-127.0.0.1}" \
             --port="${DB_PORT:-5432}" --username="${DB_USERNAME:-ycsb}" "$db" >/dev/null 2>&1 || true
     done
 fi
@@ -101,10 +101,11 @@ grep -q 'END experiment status=0' "$LOG" || fail "completion marker missing from
 for phase in load reference-load extend run reference clean-run comparison-load avg-run; do
     grep -q "phase=$phase\] START YCSB $phase" "$LOG" || fail "phase '$phase' never started"
 done
-# A phase that hits database-side errors is not a measurement, and YCSB still exits 0: the
-# JDBC binding logs "Error in processing update..." / "Data too long for column" on stderr and
-# carries on. Those lines only reach the run log, so this is where a wrong schema shows up.
-if errors=$(grep -nE 'Error in processing|Data too long|SQLSyntaxErrorException|java\.sql\.|Exceptions occurred' "$LOG"); then
+# A phase that hits database-side errors is not a measurement, and YCSB still exits 0: the JDBC
+# binding logs "Error in processing update..." / "Data too long for column" on stderr and carries
+# on, and the Neo4j binding does the same with "Error updating Neo4j: ...". Those lines only reach
+# the run log, so this is where a wrong schema shows up.
+if errors=$(grep -nE 'Error in processing|Data too long|SQLSyntaxErrorException|java\.sql\.|Exceptions occurred|Error (inserting|reading|updating) |Duplicate key detected|Failed to invoke procedure' "$LOG"); then
     echo "$errors" | head -5 | sed 's/^/[error] /' >&2
     fail "the run reported database-side errors (see above)"
 fi
@@ -124,6 +125,16 @@ rows=$(( $(wc -l < "$CSV") - 1 ))
 [[ "$(awk -F, 'NR>1 {print tolower($2)}' "$CSV" | sort -u | tr '\n' ' ')" == \
    "avg-run clean-run extend load reference run " ]] || fail "unexpected phase set in CSV"
 echo "[backend-smoke] results CSV: $rows rows, $(head -1 "$CSV" | awk -F, '{print NF}') columns"
+# The other half of the assertion above, on the measurement side: YCSB only emits a Return=ERROR
+# row when an operation actually failed, and write_result turns it into a column. A run whose
+# rows carry a non-zero count there measured failures, so it is not comparable with earlier ones.
+failed_rows=$(awk -F, '
+    NR == 1 { for (i = 1; i <= NF; i++) if ($i == "Return=ERROR") col = i; next }
+    col && $col+0 != 0 { print $2 " Return=ERROR=" $col }' "$CSV")
+[[ -z "$failed_rows" ]] || {
+    echo "$failed_rows" | sed 's/^/[error] /' >&2
+    fail "the results CSV records failed operations (Return=ERROR)"
+}
 
 mapfile -t size_files < <(find "$EXPERIMENT_DIR/data/value_size_data" -name '*.csv' 2>/dev/null | sort)
 (( ${#size_files[@]} == 2 )) || fail "expected before/after value-size CSVs, found ${#size_files[@]}"

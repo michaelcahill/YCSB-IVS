@@ -23,6 +23,10 @@ exported yourself, and the runner says so:
 [config] conf/scale.light.env: 1 assignment(s) ignored, the environment already sets them
 ```
 
+An unquoted value keeps everything after `=` verbatim, `#` included — there is no inline-comment
+syntax, because a password may contain that character. Put explanations on their own line, or
+quote the value.
+
 | File | Purpose |
 | --- | --- |
 | `db.<backend>.env` | endpoint, role and credentials. **Not committed** — copy from `db.<backend>.env.example` and keep the real file at mode 0600 |

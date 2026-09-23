@@ -50,7 +50,7 @@ db_available() {
 # reports SKIP otherwise - so the list can name backends whose server is a container that is
 # not always up. Backends in $REQUIRED_BACKEND_SMOKES additionally fail the suite under
 # REQUIRE_DB=1, because there their absence means something broke.
-BACKEND_SMOKES="${BACKEND_SMOKES:-postgresql_row postgrenosql mariadb_innodb mongodb}"
+BACKEND_SMOKES="${BACKEND_SMOKES:-postgresql_row postgrenosql mariadb_innodb mongodb neo4j}"
 REQUIRED_BACKEND_SMOKES="${REQUIRED_BACKEND_SMOKES:-postgresql_row postgrenosql}"
 
 run_backend_smoke() {

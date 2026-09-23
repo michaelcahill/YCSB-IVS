@@ -33,17 +33,18 @@ run_ycsb() {
 }
 
 # Point the binding at one database. The property NAMES are a binding detail: the JDBC
-# bindings read db.url/db.user/db.passwd, PostgreNoSQL reads postgrenosql.url/…, and MongoDB
-# has no credential properties at all (everything is in the URI), so BINDING_PARAM_PREFIX and
-# BINDING_PARAM_CREDENTIALS come from the backend. Sets the global DB_PARAMS array; every YCSB
-# invocation expands it.
+# bindings read db.url/db.user/db.passwd, PostgreNoSQL reads postgrenosql.url/…, Neo4j reads
+# url/username/password with no prefix at all, and MongoDB has no credential properties
+# (everything is in the URI). BINDING_PARAM_URL/USER/PASSWD come from the backend (via the
+# prefix) and BINDING_PARAM_CREDENTIALS says whether to send any. Sets the global DB_PARAMS
+# array; every YCSB invocation expands it.
 binding_db_params() {
-    local url="${1:?database url required}" prefix="${BINDING_PARAM_PREFIX:-db}"
-    DB_PARAMS=(-p "${prefix}.url=$url")
+    local url="${1:?database url required}"
+    DB_PARAMS=(-p "${BINDING_PARAM_URL:-db.url}=$url")
     if [[ "${BINDING_PARAM_CREDENTIALS:-1}" == 1 ]]; then
         DB_PARAMS+=(
-            -p "${prefix}.user=$DB_USERNAME"
-            -p "${prefix}.passwd=$DB_PWD"
+            -p "${BINDING_PARAM_USER:-db.user}=$DB_USERNAME"
+            -p "${BINDING_PARAM_PASSWD:-db.passwd}=$DB_PWD"
         )
     fi
 }
