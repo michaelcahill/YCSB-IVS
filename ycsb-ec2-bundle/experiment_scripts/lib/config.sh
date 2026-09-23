@@ -184,6 +184,11 @@ config::init_defaults() {
     # read db.url/db.user/db.passwd, other bindings namespace them (postgrenosql.url, …).
     BINDING_PARAM_PREFIX="${BINDING_PARAM_PREFIX:-db}"
 
+    # Dialect of the per-second runtime sampler (watcher.sh). It speaks one database's stats
+    # views; a backend that does not name one here gets OS-level sampling only, and no
+    # statistics file rather than an empty file in another database's shape.
+    RUNTIME_DB_DIALECT="${RUNTIME_DB_DIALECT:-$(registry::info runtime_watcher_dialect)}"
+
     # --- experiment identity ---------------------------------------------------
     TYPE="${TYPE:-$(registry::info default_type)}"
     YCSB_BINDING="${YCSB_BINDING:-$(registry::info default_binding)}"

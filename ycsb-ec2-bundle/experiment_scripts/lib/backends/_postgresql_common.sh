@@ -357,6 +357,72 @@ backend::close() {
 }
 
 # ---------------------------------------------------------------------------
+# Operations the phase engine asks for by name (the SQL itself is a PostgreSQL detail)
+# ---------------------------------------------------------------------------
+
+backend::sample_key() {
+    local db="${1:?database required}"
+    backend::exec -d "$db" -At -c "SELECT ycsb_key FROM usertable LIMIT 1;"
+}
+
+backend::explain_sql() {
+    local db="${1:?database required}" key="${2:?key required}"
+    backend::exec -d "$db" -c "
+    EXPLAIN (ANALYZE, BUFFERS)
+    SELECT * FROM usertable WHERE ycsb_key = '$key';
+    "
+}
+
+backend::delete_keys() {
+    local db="${1:?database required}" file="${2:?key file required}"
+    while read -r key; do
+        [[ -n "$key" ]] && printf "DELETE FROM usertable WHERE ycsb_key='%s';\n" "$key"
+    done < "$file" | backend::exec -d "$db"
+}
+
+backend::truncate() {
+    local db="${1:?database required}"
+    backend::exec -d "$db" -c "TRUNCATE TABLE usertable;"
+}
+
+# VACUUM (ANALYZE, VERBOSE) with its progress lines turned into runner log entries. Moved
+# verbatim from the phase engine: what a "clean up between phases" step means per database.
+backend::vacuum() {
+    local db="${1:?database required}"
+    local vacuum_started=$SECONDS vacuum_rc=0
+    local vacuum_detail="${LOG_FILE%.log}_iteration${iteration}_epoch${epoch}_step${step}_vacuum.raw.log"
+
+    log "START VACUUM ANALYZE database=$db"
+
+    backend::exec -d "$db" \
+        -c "VACUUM (ANALYZE, VERBOSE) public.usertable;" 2>&1 |
+        tee "$vacuum_detail" |
+        perl -ne '
+            BEGIN { $| = 1; }
+
+            if (/^INFO:\s+(?:aggressively )?vacuuming "([^"]+)"/) {
+                print "START VACUUM table=$1\n";
+            }
+            elsif (/^INFO:\s+finished vacuuming "([^"]+)"/) {
+                print "END VACUUM table=$1\n";
+            }
+            elsif (/^(?:WARNING|ERROR|FATAL|PANIC):/) {
+                print;
+            }
+        ' |
+        while IFS= read -r message; do
+            log "$message"
+        done || vacuum_rc=$?
+
+    log "END VACUUM ANALYZE database=$db status=$vacuum_rc duration=$((SECONDS-vacuum_started))s"
+
+    if (( vacuum_rc != 0 )); then
+        log "ERROR VACUUM failed; details=$vacuum_detail"
+        exit "$vacuum_rc"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Backend contract
 # ---------------------------------------------------------------------------
 

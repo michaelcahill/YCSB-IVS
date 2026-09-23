@@ -21,6 +21,8 @@ has_dump_restore=1
 supports_idle_wait=1
 requires_index_wait=0
 supports_vacuum=1
+supports_query_plan=1
+runtime_watcher_dialect=postgresql
 host_os_user=postgres
 INFO
 }

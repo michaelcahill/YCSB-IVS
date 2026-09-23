@@ -13,7 +13,8 @@ BACKENDS_DIR="$REGISTRY_DIR/backends"
 registry::required_functions() {
     printf '%s\n' backend::info backend::default_config backend::preflight \
         backend::init_db backend::collect_metrics backend::key_sizes \
-        backend::total_size backend::list_keys
+        backend::total_size backend::list_keys backend::sample_key \
+        backend::explain_sql backend::delete_keys backend::truncate
 }
 
 # Backends are discovered by filename. Files starting with an underscore are shared code
@@ -64,6 +65,7 @@ registry::load() {
     (( missing == 0 )) || return 2
 
     # Optional hooks get safe no-op defaults so the engine can call them freely.
+    declare -F backend::vacuum      >/dev/null || eval 'backend::vacuum() { :; }'
     declare -F backend::wait_idle   >/dev/null || eval 'backend::wait_idle() { :; }'
     declare -F backend::dump_restore >/dev/null|| eval 'backend::dump_restore() { return 0; }'
     declare -F backend::truncate     >/dev/null|| eval 'backend::truncate() { :; }'

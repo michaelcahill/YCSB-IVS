@@ -20,9 +20,8 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 BACKEND="${1:-${BACKEND:?usage: smoke_backend.sh <backend>}}"
 
-export DB_HOST="${DB_HOST:-127.0.0.1}"
-export DB_PORT="${DB_PORT:-5432}"
-export DB_USERNAME="${DB_USERNAME:-ycsb}"
+# Endpoint and role come from the backend's own defaults, so this script must not set them;
+# export DB_HOST/DB_PORT/DB_USERNAME to point a run somewhere else.
 export DB_PWD="${DB_PWD:?Set DB_PWD to the benchmark role password}"
 
 # Dedicated databases so a smoke run can never destroy an experiment.
@@ -67,12 +66,12 @@ export EXPERIMENT_DIR="$WORKDIR/experiment"
 # Start from a known state where the backend's admin tools allow it (PostgreSQL only).
 if command -v dropdb >/dev/null 2>&1; then
     for db in "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"; do
-        PGPASSWORD="$DB_PWD" dropdb --if-exists --host="$DB_HOST" --port="$DB_PORT" \
-            --username="$DB_USERNAME" "$db" >/dev/null 2>&1 || true
+        PGPASSWORD="$DB_PWD" dropdb --if-exists --host="${DB_HOST:-127.0.0.1}" \
+            --port="${DB_PORT:-5432}" --username="${DB_USERNAME:-ycsb}" "$db" >/dev/null 2>&1 || true
     done
 fi
 
-echo "[backend-smoke] backend=$BACKEND host=$DB_HOST:$DB_PORT user=$DB_USERNAME"
+echo "[backend-smoke] backend=$BACKEND endpoint=${DB_HOST:-<backend default>:${DB_PORT:-?}} user=${DB_USERNAME:-<backend default>}"
 echo "[backend-smoke] workdir=$WORKDIR"
 
 set +e
@@ -91,7 +90,14 @@ grep -q 'END experiment status=0' "$LOG" || fail "completion marker missing from
 for phase in load reference-load extend run reference clean-run comparison-load avg-run; do
     grep -q "phase=$phase\] START YCSB $phase" "$LOG" || fail "phase '$phase' never started"
 done
-echo "[backend-smoke] all 8 phases ran"
+# A phase that hits database-side errors is not a measurement, and YCSB still exits 0: the
+# JDBC binding logs "Error in processing update..." / "Data too long for column" on stderr and
+# carries on. Those lines only reach the run log, so this is where a wrong schema shows up.
+if errors=$(grep -nE 'Error in processing|Data too long|SQLSyntaxErrorException|java\.sql\.|Exceptions occurred' "$LOG"); then
+    echo "$errors" | head -5 | sed 's/^/[error] /' >&2
+    fail "the run reported database-side errors (see above)"
+fi
+echo "[backend-smoke] all 8 phases ran, no database-side errors in the log"
 
 CSV="$(find "$EXPERIMENT_DIR/data/workload_data" -name '*.csv' | head -1)"
 [[ -n "$CSV" ]] || fail "no results CSV under $EXPERIMENT_DIR/data/workload_data"

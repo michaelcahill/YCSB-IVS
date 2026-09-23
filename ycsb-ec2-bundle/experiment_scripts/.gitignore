@@ -1,0 +1,4 @@
+# Local credentials are never committed: copy each db.<name>.env.example to db.<name>.env.
+conf/db.*.env
+
+__pycache__/

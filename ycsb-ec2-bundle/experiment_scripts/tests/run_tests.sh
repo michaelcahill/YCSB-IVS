@@ -11,9 +11,11 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 cd "$SCRIPTS_DIR"
 
-export DB_HOST="${DB_HOST:-127.0.0.1}"
-export DB_PORT="${DB_PORT:-5432}"
-export DB_USERNAME="${DB_USERNAME:-ycsb}"
+# Probed locally and never exported: each backend brings its own endpoint defaults, and an
+# exported DB_PORT=5432 would point a MariaDB smoke run at the PostgreSQL server.
+PROBE_HOST="${DB_HOST:-127.0.0.1}"
+PROBE_PORT="${DB_PORT:-5432}"
+PROBE_USER="${DB_USERNAME:-ycsb}"
 
 step() { printf '\n=== %s ===\n' "$*"; }
 
@@ -39,23 +41,49 @@ fi
 db_available() {
     command -v psql >/dev/null 2>&1 || return 1
     [[ -n "${DB_PWD:-}" ]] || return 1
-    PGPASSWORD="$DB_PWD" PGCONNECT_TIMEOUT=5 psql -h "$DB_HOST" -p "$DB_PORT" \
-        -U "$DB_USERNAME" -d "${PG_MAINTENANCE_DB:-postgres}" -At -c 'SELECT 1;' >/dev/null 2>&1
+    PGPASSWORD="$DB_PWD" PGCONNECT_TIMEOUT=5 psql -h "$PROBE_HOST" -p "$PROBE_PORT" \
+        -U "$PROBE_USER" -d "${PG_MAINTENANCE_DB:-postgres}" -At -c 'SELECT 1;' >/dev/null 2>&1
 }
 
-step "PostgreSQL smoke run"
+# Structural end-to-end check per backend. Every backend listed here runs when a server
+# answers for it (./experiment.sh <backend> --check, which reads conf/db.<backend>.env), and
+# reports SKIP otherwise - so the list can name backends whose server is a container that is
+# not always up. Backends in $REQUIRED_BACKEND_SMOKES additionally fail the suite under
+# REQUIRE_DB=1, because there their absence means something broke.
+BACKEND_SMOKES="${BACKEND_SMOKES:-postgresql_row postgrenosql mariadb_innodb}"
+REQUIRED_BACKEND_SMOKES="${REQUIRED_BACKEND_SMOKES:-postgresql_row postgrenosql}"
+
+run_backend_smoke() {
+    local backend="$1" out reason
+    [[ " $BACKEND_SMOKES " == *" $backend "* ]] || return 0
+    out="$(mktemp)"
+    if ./experiment.sh "$backend" --check >"$out" 2>&1; then
+        bash tests/smoke_backend.sh "$backend"
+    else
+        reason="$(grep -m1 -E '\[ERROR\]' "$out" || tail -n1 "$out")"
+        if [[ " ${REQUIRED_BACKEND_SMOKES:-} " == *" $backend "* && "${REQUIRE_DB:-0}" == 1 ]]; then
+            echo "[tests] required backend '$backend' unreachable: $reason"
+            rm -f "$out"
+            exit 1
+        fi
+        echo "[tests] $backend SKIPPED - $reason"
+    fi
+    rm -f "$out"
+}
+
+step "PostgreSQL smoke run (goldens)"
 if db_available; then
     bash tests/smoke_authoritative.sh
-    # Structural check of every backend whose server is reachable here. The PostgreSQL
-    # backends are; the others need servers this machine does not run.
-    for backend in postgresql_row postgrenosql; do
-        bash tests/smoke_backend.sh "$backend"
-    done
 elif [[ "${REQUIRE_DB:-0}" == 1 ]]; then
-    echo "[tests] REQUIRE_DB=1 but no PostgreSQL answered at $DB_HOST:$DB_PORT as $DB_USERNAME"
+    echo "[tests] REQUIRE_DB=1 but no PostgreSQL answered at $PROBE_HOST:$PROBE_PORT as $PROBE_USER"
     exit 1
 else
     echo "[tests] SKIPPED - set DB_PWD (and optionally REQUIRE_DB=1) to run it"
 fi
+
+step "backend structural smokes"
+for backend in $BACKEND_SMOKES; do
+    run_backend_smoke "$backend"
+done
 
 step "all checks passed"

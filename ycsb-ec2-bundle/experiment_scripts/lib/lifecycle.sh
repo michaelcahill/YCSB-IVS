@@ -81,6 +81,8 @@ run_with_metrics() {
         OS_DISK_DEVICE_FILE="" \
         OS_DISK_DEVICES="$OS_DISK_DEVICES" \
         DB_STATS_TABLE="$TARGET_TABLE" \
+        DB_DIALECT="${RUNTIME_DB_DIALECT:-}" \
+        OS_PROCESS_USER="${HOST_OS_USER:-}" \
         DB_STATS_INTERVAL="$DB_STATS_INTERVAL" \
         INTERVAL=1 \
         ./watcher.sh &
@@ -262,39 +264,10 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             append_subsequent_iterations $KEY_SIZE_LOG $KEY_SIZE_FILE_AFTER_EXTEND
         fi
 
-        if [[ $vacuum -eq 1 ]]; then
-            vacuum_started=$SECONDS
-            vacuum_rc=0
-            vacuum_detail="${LOG_FILE%.log}_iteration${iteration}_epoch${epoch}_step${step}_vacuum.raw.log"
-
-            log "START VACUUM ANALYZE database=$DB_NAME"
-
-            backend::exec -d "$DB_NAME" \
-                -c "VACUUM (ANALYZE, VERBOSE) public.usertable;" 2>&1 |
-                tee "$vacuum_detail" |
-                perl -ne '
-                    BEGIN { $| = 1; }
-
-                    if (/^INFO:\s+(?:aggressively )?vacuuming "([^"]+)"/) {
-                        print "START VACUUM table=$1\n";
-                    }
-                    elsif (/^INFO:\s+finished vacuuming "([^"]+)"/) {
-                        print "END VACUUM table=$1\n";
-                    }
-                    elsif (/^(?:WARNING|ERROR|FATAL|PANIC):/) {
-                        print;
-                    }
-                ' |
-                while IFS= read -r message; do
-                    log "$message"
-                done || vacuum_rc=$?
-
-            log "END VACUUM ANALYZE database=$DB_NAME status=$vacuum_rc duration=$((SECONDS-vacuum_started))s"
-
-            if (( vacuum_rc != 0 )); then
-                log "ERROR VACUUM failed; details=$vacuum_detail"
-                exit "$vacuum_rc"
-            fi
+        # Reclaim space and refresh planner statistics between phases, for backends where
+        # that is a manual operation (PostgreSQL). What it means is a backend detail.
+        if (( vacuum == 1 )) && registry::capability supports_vacuum; then
+            backend::vacuum "$DB_NAME"
         fi
 
         phase="run-setup"
@@ -305,26 +278,23 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         # Save the existing keys in the database
         backend::list_keys "$DB_NAME" keys_before_run.txt
 
-        # Log query plan before run phase
+        # Log the plan of a single-key lookup before the measured phase, for backends that
+        # can explain one. The statement text and its output format are backend details.
         log "Checking query plan before run phase"
+        if registry::capability supports_query_plan; then
+            TEST_KEY="$(backend::sample_key "$DB_NAME")"
+            {
+                echo "========================================"
+                echo "Epoch=$epoch Step=$step Phase=run Time=$(date)"
+                echo "DB=$DB_NAME"
+                echo "Key=$TEST_KEY"
+                echo "----------------------------------------"
 
-        TEST_KEY=$(backend::exec -d "$DB_NAME" -At -c \
-        "SELECT ycsb_key FROM usertable LIMIT 1;")
+                backend::explain_sql "$DB_NAME" "$TEST_KEY"
 
-        {
-            echo "========================================"
-            echo "Epoch=$epoch Step=$step Phase=run Time=$(date)"
-            echo "DB=$DB_NAME"
-            echo "Key=$TEST_KEY"
-            echo "----------------------------------------"
-
-            backend::exec -d "$DB_NAME" -c "
-            EXPLAIN (ANALYZE, BUFFERS)
-            SELECT * FROM usertable WHERE ycsb_key = '$TEST_KEY';
-            "
-
-            echo
-        } >> "$PLAN_LOG"
+                echo
+            } >> "$PLAN_LOG"
+        fi
         log "END query plan"
 
         # Execute the run phase
@@ -352,11 +322,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         # Get keys that are in keys_after_run.txt but not in keys.txt
         comm -13 keys_before_sorted.txt keys_after_sorted.txt > keys_to_delete.txt
 
-        # Delete keys from PostgreSQL
-        KEYS_TO_DELETE_FILE="$(pwd)/keys_to_delete.txt"
-        while read key; do
-            echo "DELETE FROM usertable WHERE ycsb_key='$key';"
-        done < "$KEYS_TO_DELETE_FILE" | backend::exec -d "$DB_NAME"
+        backend::delete_keys "$DB_NAME" keys_to_delete.txt
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
 
@@ -391,11 +357,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         # Get keys that are in keys_after_run.txt but not in keys.txt
         comm -13 keys_before_sorted.txt keys_after_sorted.txt > keys_to_delete.txt
 
-        # Delete keys from PostgreSQL
-        KEYS_TO_DELETE_FILE="$(pwd)/keys_to_delete.txt"
-        while read key; do
-            echo "DELETE FROM usertable WHERE ycsb_key='$key';"
-        done < "$KEYS_TO_DELETE_FILE" | backend::exec -d "$UNCHANGED_DB_NAME"
+        backend::delete_keys "$UNCHANGED_DB_NAME" keys_to_delete.txt
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
     
@@ -467,8 +429,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             actual_fieldlength="$(workload::get_value "$WORKLOAD_PHASE" fieldlength)"
             log "Workload file fieldlength set to: $actual_fieldlength (expected: $fieldlengthaverage)"
 
-            backend::exec -d "$BACKUP_DB_NAME" \
-            -c "TRUNCATE TABLE usertable;"
+            backend::truncate "$BACKUP_DB_NAME"
 
             # Resetting the database with new data load
             phase="comparison-load"

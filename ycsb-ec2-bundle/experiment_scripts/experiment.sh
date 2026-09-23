@@ -62,6 +62,8 @@ Options:
   --workload FILE     read-only workload template (never modified)
   --experiment-dir D  root for logs, data and generated workloads
   --dry-run           resolve configuration, print it, do not benchmark
+  --check             run the backend's preflight (server reachable, role allowed,
+                      build artifacts present) and exit without benchmarking
   --list-backends     list backends and exit
   -h, --help          this help
 
@@ -76,6 +78,7 @@ USAGE
 
 BACKEND=""
 DRY_RUN=0
+CHECK_ONLY=0
 CONFIG_FILES=()
 declare -a VAR_OVERRIDES=()
 
@@ -109,6 +112,7 @@ while (($#)); do
             [[ "${2:-none}" == none ]] || { echo "[error] --instrument is not implemented yet" >&2; exit 2; }
             shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
+        --check) CHECK_ONLY=1; shift ;;
         -*) echo "[error] unknown option: $1" >&2; usage >&2; exit 2 ;;
         *)
             [[ -z "$BACKEND" ]] || { echo "[error] unexpected argument: $1" >&2; exit 2; }
@@ -146,6 +150,18 @@ fi
 config::init_defaults
 # Paths are derived last so that any layer above renames every artefact consistently.
 config::derive_paths
+
+if (( CHECK_ONLY )); then
+    # Exactly the checks run_experiment performs before it touches anything: this is how a
+    # test suite or an operator asks "is a server reachable for this backend?" without
+    # running a benchmark. The probe databases it creates are dropped again.
+    if backend::preflight true "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"; then
+        echo "[check] $ACTIVE_BACKEND preflight passed"
+        exit 0
+    fi
+    echo "[check] $ACTIVE_BACKEND preflight FAILED (see the messages above)" >&2
+    exit 1
+fi
 
 if (( DRY_RUN )); then
     cat <<DRYRUN

@@ -20,6 +20,19 @@ DB_STATS_FILE=${DB_STATS_FILE:-$default_db_stats_file}
 PG_1S_FILE=${PG_1S_FILE:-}
 OS_1S_FILE=${OS_1S_FILE:-}
 OS_DISK_DEVICES=${OS_DISK_DEVICES:-auto}
+
+# Which database the per-second sampling speaks. The queries below are PostgreSQL, so a run
+# against another backend passes DB_DIALECT=<something else> (or nothing) and gets OS-only
+# sampling instead of a psql failure every interval: no .dbstats file is written rather than
+# an empty PostgreSQL-shaped one. Unset means PostgreSQL: the legacy runners call this script
+# directly and never set it. The new runner always sets it, possibly to the empty string,
+# which means "no database-side sampling" rather than "fall back to PostgreSQL".
+DB_DIALECT=${DB_DIALECT-postgresql}
+DB_STATS_ENABLED=0
+[ "$DB_DIALECT" = postgresql ] && DB_STATS_ENABLED=1
+# OS account of the database server, used for CPU/memory when there is no dialect-specific
+# process list to ask (the runner passes host_os_user from the backend's metadata).
+OS_PROCESS_USER=${OS_PROCESS_USER:-}
 OS_DISK_DEVICE_FILE=${OS_DISK_DEVICE_FILE:-}
 
 OS_DISK_SELECTION=""
@@ -87,6 +100,7 @@ psql_csv() {
 }
 
 write_db_stats_header() {
+    [ "$DB_STATS_ENABLED" = 1 ] || return 0
     if [ -f "$DB_STATS_FILE" ]; then
         return
     fi
@@ -152,6 +166,7 @@ write_os_disk_device_header() {
 
 collect_db_stats() {
     local db_stats bgwriter_stats wal_stats relation_stats table_stats
+    [ "$DB_STATS_ENABLED" = 1 ] || { printf ''; return 0; }
 
     db_stats=$(psql_csv postgres "
         SELECT numbackends, blks_read, blks_hit, tup_returned, tup_fetched,
@@ -653,6 +668,13 @@ collect_disk_rates_for_devices() {
     printf -v "$prev_weighted_io_ms_var" '%s' "$weighted_io_ms"
 }
 
+# PostgreSQL I/O totals for the phase; empty for any other dialect, which the caller turns
+# into NULL columns.
+collect_pg_io_totals_guarded() {
+    [ "$DB_STATS_ENABLED" = 1 ] || { printf ''; return 0; }
+    collect_pg_io_totals
+}
+
 collect_pg_io_totals() {
     local totals
 
@@ -731,8 +753,10 @@ init_disk_device_selection
 record_disk_device_selection
 
 if [ "${ONESHOT_DBSTATS:-0}" = "1" ]; then
-    ts=$(date +%s)
-    echo "$phase,$epoch,$ts,$(collect_db_stats)" >> "$DB_STATS_FILE"
+    if [ "$DB_STATS_ENABLED" = 1 ]; then
+        ts=$(date +%s)
+        echo "$phase,$epoch,$ts,$(collect_db_stats)" >> "$DB_STATS_FILE"
+    fi
     exit 0
 fi
 
@@ -742,11 +766,18 @@ last_db_stats=0
 
 while true; do
     # --- Get PIDs ---
-    pids=$(printf '%s\n' "SELECT pid FROM pg_stat_activity WHERE datname =  '$db_name';" \
-        | sudo -u postgres     psql                   -d postgres -t -A \
-        -v ON_ERROR_STOP=1 \
-        -v watch_db="$db_name" 2>/dev/null \
-        | paste -sd "," -)
+    if [ "$DB_STATS_ENABLED" = 1 ]; then
+        pids=$(printf '%s\n' "SELECT pid FROM pg_stat_activity WHERE datname =  '$db_name';" \
+            | sudo -u postgres     psql                   -d postgres -t -A \
+            -v ON_ERROR_STOP=1 \
+            -v watch_db="$db_name" 2>/dev/null \
+            | paste -sd "," -)
+    elif [ -n "$OS_PROCESS_USER" ]; then
+        # No dialect-specific process list: sample the server's OS account instead.
+        pids=$(pgrep -u "$OS_PROCESS_USER" 2>/dev/null | paste -sd "," -)
+    else
+        pids=""
+    fi
 
     if [ -z "$pids" ]; then
         cpu="NULL"
@@ -759,7 +790,7 @@ while true; do
         mem_kb=${mem_kb:-0}
     fi
 
-    pg_io_totals=$(collect_pg_io_totals)
+    pg_io_totals=$(collect_pg_io_totals_guarded)
     pg_read_bytes=${pg_io_totals%%,*}
     pg_write_bytes=${pg_io_totals#*,}
 
@@ -798,7 +829,8 @@ while true; do
         total_disk_rates="$DISK_RATES_RESULT"
         echo "$db_name,$phase,$epoch,$ts_ms,$cpu,$mem_kb,$(collect_meminfo),$selected_disk_rates,$OS_DISK_SELECTION_LABEL,$OS_DISK_SELECTION_SOURCE,$total_disk_rates" >> "$OS_1S_FILE"
     fi
-    if [ "$DB_STATS_INTERVAL" -gt 0 ] && [ $((ts - last_db_stats)) -ge "$DB_STATS_INTERVAL" ]; then
+    if [ "$DB_STATS_ENABLED" = 1 ] && [ "$DB_STATS_INTERVAL" -gt 0 ] &&
+        [ $((ts - last_db_stats)) -ge "$DB_STATS_INTERVAL" ]; then
         echo "$phase,$epoch,$ts,$(collect_db_stats)" >> "$DB_STATS_FILE"
         last_db_stats=$ts
     fi
