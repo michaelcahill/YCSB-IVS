@@ -67,8 +67,15 @@ WLEOF
 export WORKLOAD_FILE="$WORKLOAD"
 export EXPERIMENT_DIR="$WORKDIR/experiment"
 
-# Start from a known state where the backend's admin tools allow it (PostgreSQL only).
-if command -v dropdb >/dev/null 2>&1; then
+# Start from a known state where the backend's admin tools allow it. The dropping below is
+# PostgreSQL-only (dropdb + PGPASSWORD), so ask the backend which server it talks to first -
+# running it against MongoDB's port would hang waiting for a password that does not exist.
+# shellcheck source=lib/registry.sh
+source "$SCRIPTS_DIR/lib/registry.sh"
+registry::load "$BACKEND" >/dev/null
+DB_DIALECT="$(registry::info runtime_watcher_dialect)"
+
+if [[ "$DB_DIALECT" == postgresql ]] && command -v dropdb >/dev/null 2>&1; then
     for db in "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"; do
         PGPASSWORD="$DB_PWD" dropdb --if-exists --host="${DB_HOST:-127.0.0.1}" \
             --port="${DB_PORT:-5432}" --username="${DB_USERNAME:-ycsb}" "$db" >/dev/null 2>&1 || true

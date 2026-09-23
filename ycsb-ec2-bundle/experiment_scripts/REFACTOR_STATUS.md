@@ -1,9 +1,9 @@
 # Refactor Status — experiment scripts
 
 Plan: [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) · Branch: `refactor/experiment-scripts`
-Last updated: **steps 1–4 complete; step 5 in progress (all PostgreSQL backends and**
-**mariadb_innodb done, verified end-to-end)** — one runner (`experiment.sh <backend>`), four
-verified backends behind shared modules, an engine that calls nothing but `backend::*`, a
+Last updated: **steps 1–4 complete; step 5 in progress (all PostgreSQL backends,**
+**mariadb_innodb and mongodb done, verified end-to-end)** — one runner (`experiment.sh <backend>`),
+five verified backends behind shared modules, an engine that calls nothing but `backend::*`, a
 layered config layer with a legacy-launcher alias shim, and **workload files are read-only
 templates** (one generated file per phase in the experiment directory). Goldens unchanged apart
 from the intended `-P` paths.
@@ -23,11 +23,12 @@ checkpoint, and keep the **Step status** table current.
 | psql/createdb/dropdb/pg_dump | ✅ PG 18.6 client | satisfies the scripts' PG18 preflight |
 | `jdbc-array` binding jar | ⚠️ not built | `jdbc-array/target/` absent; build: `mvn -o -Psource-run -pl site.ycsb:jdbc-array-binding -am package -DskipTests` (log `/tmp/mvn-jdbc-array.log`) |
 | Other module jars | ✅ present | `core/target/core-0.18.0-SNAPSHOT.jar`, `jdbc/`, `jdbc-array-json/`, `postgrenosql/` |
-| shellcheck | ✅ installed (2026-09-24) | `tools/check_scripts.sh` now runs it: the harness (`lib/`, `experiment.sh`, `tests/`, `tools/`) must be clean, 16 legacy scripts warn without failing (list only shrinks; `SHELLCHECK_STRICT=1` fails on everything). SC2034/SC2154 are excluded globally because these scripts share globals across sourced files |
+| shellcheck | ✅ installed (2026-09-24) | `tools/check_scripts.sh` now runs it: the harness (`lib/`, `experiment.sh`, `tests/`, `tools/`) must be clean, 14 legacy scripts warn without failing (list only shrinks; `SHELLCHECK_STRICT=1` fails on everything). SC2034/SC2154 are excluded globally because these scripts share globals across sourced files |
 | sudo | ❌ password required | cannot create PG roles or touch the server config; use the existing `ycsb` role |
 | podman | ✅ working, can pull images | found 2026-09-24: `podman run docker.io/library/mariadb:11` starts and answers on a published port (rootless). No docker, no local mariadb/mongo/neo4j/couchbase server binaries — containers are how the remaining backends can be smoke-tested here |
 | MariaDB container | ✅ up, backend verified | `ycsb_mariadb` = `docker.io/library/mariadb:11` (server 11.8.9) published on `-p 3307:3306`, role `ycsb` with global CREATE/DROP; endpoint + container wrap live in the **untracked** `conf/db.mariadb_innodb.env`, example file added |
 | MariaDB JDBC driver | ✅ present | `jdbc/target/dependency/mariadb-java-client-3.4.1.jar`; not part of the YCSB build, so preflight checks for it explicitly (`BACKEND_DRIVER_JAR`) |
+| MongoDB container | ✅ up, backend verified | `ycsb_mongo` = `docker.io/library/mongo:5.0` on `-p 27017:27017`, no auth (like the legacy runners). No mongosh/mongodump/mongorestore on this host, so admin tools run through **`MONGO_CLI_WRAP=podman exec -i ycsb_mongo`** (tools 100.17 inside the image); endpoint + wrap in the untracked `conf/db.mongodb.env`, example file added. The `mongodb` binding is built and got a minimal `mongodb/conf/mongodb.properties` (it ships without a conf dir, but every YCSB invocation needs a properties file) |
 
 Note: the smoke suite needs the `jdbc-array` binding built once:
 `mvn -o -pl site.ycsb:jdbc-array-binding -am package -DskipTests` (already done here).
@@ -46,6 +47,7 @@ bash tests/test_config_workload.sh                # config layer + workload gene
 python3 -m unittest discover -s tests -t tests    # mock-based runner tests, no DB
 DB_PWD=USyd2025 bash tests/smoke_authoritative.sh # real PG18 end-to-end vs goldens
 DB_PWD=USyd2025 bash tests/smoke_backend.sh mariadb_innodb  # structural check, any reachable backend
+bash tests/smoke_backend.sh mongodb                 # needs the ycsb_mongo container, no DB_PWD
 
 # is a server reachable for one backend? (what run_tests.sh uses to skip)
 ./experiment.sh mariadb_innodb --check
@@ -64,7 +66,7 @@ work directory is kept for inspection.
 | 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ✅ done | PG backend module (387 ln) with `backend::*` contract + legacy aliases; `lib/registry.sh` discovers and validates backends; `experiment.sh` is the single entry point; authoritative script is now a compatibility shim |
 | 3 | `config.sh` + `conf/` presets + alias shim + `--help/--dry-run/--list-backends` | DONE | layered config with `${VAR:-default}` everywhere and `config::derive_paths` last; flags `--var/--config/--epochs/--steps/--run-id/--type/--scale/--workload/--experiment-dir/--dry-run/--list-backends`; legacy alias shim (`DIST`, `WORK`, `UNCHANGE_DB_NAME`, `EXPERIMENT_EPOCHS`, `EXPERIMENT_RUNS_PER_EPOCH`, `DB_PASSWORD`, `FIELD_LENGTH_ORIGINAL`, `vacuum`, `EXTEND_*`/`RUN_*` proportions) with deprecation lines; `conf/scale.{heavy,light}.env`; 31 assertions in `tests/test_config_workload.sh`. `--mode baseline` / `--instrument` still rejected until steps 6 and 8b |
 | 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | DONE | `lib/workload.sh`: one immutable, provenance-tagged file per YCSB invocation; the 22 in-place `perl -i -p` rewrites and the `awk` strip are gone from `lib/lifecycle.sh`; preflight no longer needs a writable workload; smoke asserts `../workloads` stays clean and that all 8 phase files exist |
-| 5 | `lifecycle.sh` engine + backend ports (PG row -> postgrenosql -> mariadb x2 -> mongodb -> neo4j -> couchbase) | IN PROGRESS | **done:** engine drives only `backend::*`; PostgreSQL split into `_postgresql_common.sh` + `postgresql_textarray` / **`postgresql_row`** / **`postgrenosql`**, plus **`mariadb_innodb`** on `_mariadb_common.sh` - all four verified end-to-end; `experiment_postgresql.sh`, `experiment_postgresql_array.sh`, `experiment_postgrenosql.sh` and `experiment_mariadb_innodb.sh` are shims. **Remaining:** mongodb, neo4j, couchbase (podman containers available), mariadb_rocksdb (the stock MariaDB image has no RocksDB engine).
+| 5 | `lifecycle.sh` engine + backend ports (PG row -> postgrenosql -> mariadb x2 -> mongodb -> neo4j -> couchbase) | IN PROGRESS | **done:** engine drives only `backend::*`; PostgreSQL split into `_postgresql_common.sh` + `postgresql_textarray` / **`postgresql_row`** / **`postgrenosql`**, plus **`mariadb_innodb`** on `_mariadb_common.sh` and **`mongodb`** - all five verified end-to-end; `experiment_postgresql.sh`, `experiment_postgresql_array.sh`, `experiment_postgrenosql.sh`, `experiment_mariadb_innodb.sh` and `experiment_mongodb.sh` are shims. **Remaining:** neo4j, couchbase (podman containers available), mariadb_rocksdb (the stock MariaDB image has no RocksDB engine).
 | 6 | `--mode baseline`; delete legacy `*_baseline.sh` | ⬜ pending | |
 | 7 | `tools/bundle.sh`, `tools/deploy.sh`, README rewrite, gitignore | ⬜ pending | |
 | 8a | `postgresql_json` backend | ⬜ pending | |
@@ -84,7 +86,7 @@ backend is listed in `BACKEND_SMOKES` in `tests/run_tests.sh`, which asks
 in the world to be up, while `REQUIRE_DB=1` still fails when a *required* backend (the
 PostgreSQL family) is unreachable.
 
-Next: **mongodb**, then neo4j, couchbase, and mariadb_rocksdb last (no RocksDB storage engine
+Next: **neo4j**, then couchbase, and mariadb_rocksdb last (no RocksDB storage engine
 in the stock MariaDB image - it needs a purpose-built image or stays unverified).
 
 0. **Asking whether a backend is usable here:** `./experiment.sh <backend> --check` runs that
@@ -102,7 +104,7 @@ in the stock MariaDB image - it needs a purpose-built image or stays unverified)
    backend (`backend::metric_names`, in `_postgresql_common.sh` / `_mariadb_common.sh`) and
    `lib/metrics.sh` keeps only CPU/memory sampling of `host_os_user`. A hygiene test fails if
    PostgreSQL names reappear in core.
-3. Port one at a time: ~~postgrenosql~~ -> ~~mariadb_innodb~~ -> mongodb -> neo4j -> couchbase
+3. Port one at a time: ~~postgrenosql~~ -> ~~mariadb_innodb~~ -> ~~mongodb~~ -> neo4j -> couchbase
    -> mariadb_rocksdb. A ported backend gets its module, its legacy script becomes a one-line
    shim (which also leaves `LEGACY_WITH_WARNINGS` in `tools/check_scripts.sh`), and it joins
    `BACKEND_SMOKES` only once a server answers for it here; otherwise the module stays
@@ -287,6 +289,38 @@ Facts that save time when resuming:
 - EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.
 
 ## Log
+
+### 2026-09-24 — step 5b: mongodb backend (verified end-to-end)
+
+- `lib/backends/mongodb.sh` (admin CLI wrapper, preflight, dump/restore, size helpers, contract)
+  + `conf/db.mongodb.env.example` + a minimal `mongodb/conf/mongodb.properties` (the mongodb
+  binding ships without a conf directory, but the harness passes one properties file to every
+  YCSB invocation). `experiment_mongodb.sh` is a one-line shim and left `LEGACY_WITH_WARNINGS`
+  (14 legacy scripts remain); `mongodb` joined `BACKEND_SMOKES`.
+- **No statistics columns**, exactly like the legacy header: `backend::metric_names` is empty,
+  so the results CSV has the 22 base columns. CPU/Memory sample `HOST_OS_USER=mongod`, or report
+  0 when the server is a container and there is no local process to sample.
+- **Comparison database on the same server.** The legacy runner needed a second mongod on 28018
+  and restored into a database of the same name; here `mongodump --archive | mongorestore
+  --nsFrom/--nsTo` keeps `ycsb_backup` apart from `ycsb`. Two silent failures found by running
+  it: (a) giving mongorestore a **database in `--uri`** makes it filter namespaces to that name,
+  so a target-named URI restores *0 documents and exits 0* - the restore URI must be server-only
+  (`MONGO_SERVER_URL`); (b) "nothing matched the rename" is not an error either, so the
+  source/target document-count comparison is what actually catches it (plus a non-empty-archive
+  check).
+- Two connection knobs the engine used to hardcode are now backend configuration:
+  `BINDING_PARAM_CREDENTIALS=0` (the mongodb binding has no user/password properties - the URI
+  carries everything) next to the existing `BINDING_PARAM_PREFIX=mongodb`.
+- **Test-harness fix found by this port:** `tests/smoke_backend.sh` pre-cleaned its databases
+  with `dropdb`/`PGPASSWORD` whenever a psql client was on `PATH` - for MongoDB that meant three
+  connections to the postgres port hanging on a password prompt (and, if a PostgreSQL server *is*
+  reachable, dropping unrelated databases). It now asks the backend's own
+  `runtime_watcher_dialect` via `lib/registry.sh` and only cleans up for `postgresql`.
+- Verified: value size grows 233576 -> 263576 across extend, the restored comparison database
+  reports the same 263576, the average-field-length reload lands at 295576; no database-side
+  error lines in the run log. Suite: static checks PASS (14 legacy warnings) - 38 shell + 7
+  python tests OK - authoritative smoke PASS against unchanged goldens - postgresql_row,
+  postgrenosql, mariadb_innodb and mongodb structural smokes PASS.
 
 ### 2026-09-24 — step 5b: mariadb_innodb backend (verified end-to-end)
 

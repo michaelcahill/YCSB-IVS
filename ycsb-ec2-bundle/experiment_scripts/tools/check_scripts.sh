@@ -23,7 +23,6 @@ LEGACY_WITH_WARNINGS=(
     ./experiment_mariadb_innodb_baseline.sh
     ./experiment_mariadb_rocksdb.sh
     ./experiment_mariadb_rocksdb_baseline.sh
-    ./experiment_mongodb.sh
     ./experiment_mongodb_baseline.sh
     ./experiment_neo4j.sh
     ./experiment_neo4j_baseline.sh
