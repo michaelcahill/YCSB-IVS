@@ -28,14 +28,20 @@ BACKUP_FILE="./ycsb_dump.sql"
 UNCHANGE_DB_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$UNCHANGE_DB_NAME"
 
 # Change naming parameters here
-TYPE="postgrenosql"
-DIST="uniform" # "uniform" OR "zipfian"
-SCALE="heavy" # "heavy" OR "light"
-WORK="mixed" # e.g. "mixed", "pure", or "spreadrun"
-RUN="1"
+# Naming/output parameters can be overridden from the environment (e.g. for a small smoke
+# configuration) so that its artifacts do not overwrite the real experiment's outputs.
+TYPE="${TYPE:-postgrenosql}"
+DIST="${DIST:-uniform}" # "uniform" OR "zipfian"
+SCALE="${SCALE:-heavy}" # "heavy" OR "light"
+WORK="${WORK:-mixed}" # e.g. "mixed", "pure", or "spreadrun"
+RUN="${RUN:-1}"
+
+# Number of epochs and runs per epoch; defaults keep the historical 10x10 experiment.
+EPOCHS="${EPOCHS:-10}"
+RUNS_PER_EPOCH="${RUNS_PER_EPOCH:-10}"
 
 # Define the workload file and the log file
-WORKLOAD_FILE="../workloads/workloada-extend"
+WORKLOAD_FILE="${WORKLOAD_FILE:-../workloads/workloada-extend}"
 LOG_FILE="./ycsb_${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}_results.log"
 EXPERIMENT_NAME="${TYPE}_${DIST}_${SCALE}_${WORK}_run${RUN}"
 # Directory that holds the per-phase metrics/watcher/javagc/restore/vacuum artifacts.
@@ -88,7 +94,7 @@ readrequestdistribution_postextend="uniform"
 updaterequestdistribution_postextend="uniform"
 
 fieldlengthoriginal="100"
-extendoperationcount="100000"
+extendoperationcount="${EXTENDOPERATIONCOUNT:-100000}"
 
 # Function to log and print messages.
 # Diagnostics go to stderr so they can never be captured by $(pg_exec ...) results, and are
@@ -422,7 +428,8 @@ run_ycsb() {
     local label="$1"
     local epoch="$2"
     local details_file started=$SECONDS rc=0
-    shift
+    # Drop the label and epoch arguments; the rest is the ycsb command line.
+    shift 2
 
     details_file="stepdetail_logs/${LOG_FILE%.log}_epoch${epoch:-0}_${label}.log"
     mkdir -p "$(dirname "$details_file")"
@@ -559,7 +566,7 @@ write_result() {
         postgres_stats+=("${!field_name}")
     done
     postgres_stats_csv=$(IFS=','; echo "${postgres_stats[*]}")
-    r=$((10 * (${epoch:-1} - 1) + ${run:-0}))
+    r=$((RUNS_PER_EPOCH * (${epoch:-1} - 1) + ${run:-0}))
     [[ "$phase" != load ]] || r=0
     base_header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,$stats_header,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec)"
     previous="$OUTPUT_FILE"
@@ -726,9 +733,9 @@ run_with_metrics "$UNCHANGE_DB_NAME" "$phase" "0" "$OUTPUT_CSV" \
 original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
 # Experiment parameters
-for epoch in $(seq 1 10); do
-    for run in $(seq 1 10); do
-        iteration=$((10*($epoch-1)+$run))
+for epoch in $(seq 1 "$EPOCHS"); do
+    for run in $(seq 1 "$RUNS_PER_EPOCH"); do
+        iteration=$((RUNS_PER_EPOCH*($epoch-1)+$run))
 
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
@@ -816,7 +823,7 @@ for epoch in $(seq 1 10); do
         get_key_sizes $KEY_SIZE_LOG $HISTOGRAM_FILE
 
         # Check if the output file exists, if not, create it with headers
-        iteration=$((10*($epoch-1)+$run))
+        iteration=$((RUNS_PER_EPOCH*($epoch-1)+$run))
 
         if [[ ! -f "$KEY_SIZE_FILE_AFTER_EXTEND" ]]; then
             # Add header row
@@ -995,7 +1002,7 @@ for epoch in $(seq 1 10); do
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
 
-        if (( $((10*($epoch-1)+$run)) % 1 == 0 )); then
+        if (( iteration % 1 == 0 )); then
             phase="clean-run"
 
             log "Backing up the database started"
@@ -1032,7 +1039,7 @@ for epoch in $(seq 1 10); do
             >> "$KEY_SIZE_LOG"
 
             # Check if the output file exists, if not, create it with headers
-            iteration=$((10*($epoch-1)+$run))
+            iteration=$((RUNS_PER_EPOCH*($epoch-1)+$run))
             if [[ ! -f "$KEY_SIZE_FILE_AFTER_RUN" ]]; then
                 # Add header row
                 echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_RUN"
@@ -1083,7 +1090,7 @@ for epoch in $(seq 1 10); do
             run_ycsb "comparison-load" "${iteration}" load "$YCSB_BINDING" -s -P "$WORKLOAD_FILE" -P "$NOSQL_PROPERTIES" -p postgrenosql.url="$BACKUP_URL" -p postgrenosql.user="$DB_USERNAME" -p postgrenosql.passwd="$DB_PWD"
 
             # Verify record sizes after avg-run load
-            iteration=$((10*($epoch-1)+$run))
+            iteration=$((RUNS_PER_EPOCH*($epoch-1)+$run))
             total_size_avg_run=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(ycsb_value::text)) FROM usertable;")
             log "Avg-run verification - Epoch:$epoch Run:$run Iteration:$iteration TotalSize:$total_size_avg_run ExpectedFieldLength:$fieldlengthaverage"
 
