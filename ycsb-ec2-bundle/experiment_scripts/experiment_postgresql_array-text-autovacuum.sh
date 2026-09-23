@@ -534,8 +534,7 @@ run_ycsb() {
     local details_file started=$SECONDS rc=0
     shift
 
-#    details_file="stepdetail_logs/${LOG_FILE%.log}_epoch${epoch:-0}_step${step:-0}_${label}"
-    details_file="stepdetail_logs/${LOG_FILE%.log}_epoch${epoch:-0}_${label}.log"
+    details_file="$(dirname "$LOG_FILE")/stepdetail_logs/$(basename "$LOG_FILE" ".log")_epoch${epoch:-0}_${label}.log"
     mkdir -p "$(dirname "$details_file")"
 
     log "START YCSB $label"
@@ -574,7 +573,7 @@ run_with_metrics() {
     db_stats_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.dbstats"
     disk_stats_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.diskstats"
     os_1s_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.osstats"
-    details_file="stepdetail_logs/${LOG_FILE%.log}_epoch${epoch:-0}_${phase}.log"
+    details_file="$(dirname "$LOG_FILE")/stepdetail_logs/$(basename "$LOG_FILE" ".log")_epoch${epoch:-0}_${phase}.log"
 
     echo "Starting metrics collection for $db_name"
     mkdir -p "${LOG_DIR}"
