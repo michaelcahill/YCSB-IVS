@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bundle tests for the experiment harness (REFACTOR_PLAN.md step 7).
+# Bundle tests for the experiment harness.
 #
 #   bash tests/test_bundle.sh        # no database needed
 #

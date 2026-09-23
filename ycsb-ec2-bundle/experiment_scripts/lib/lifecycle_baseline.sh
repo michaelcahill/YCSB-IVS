@@ -16,8 +16,8 @@
 # Why it exists as a mode instead of a script: the nine legacy `experiment_*_baseline.sh`
 # runners each carried a private copy of the phase loop, their own `write_result`, their own
 # shorter metric set and in-place workload rewrites, and had drifted from the authoritative
-# script in every one of those ways. Their bodies were discarded rather than ported
-# (REFACTOR_PLAN.md §0); this file is what replaces all nine.
+# script in every one of those ways. Their bodies were discarded rather than ported;
+# this file is what replaces all nine.
 #
 # Consequences of running without the comparison databases:
 #   * $UNCHANGED_DB_NAME and $BACKUP_DB_NAME are never created, dropped or written to;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# tools/deploy.sh — ship the experiment harness to an EC2 host (REFACTOR_PLAN.md step 7).
+# tools/deploy.sh — ship the experiment harness to an EC2 host.
 #
 #   tools/deploy.sh --host [user@]server [--key KEY.pem] [--remote-dir DIR]
 #                   [--include-config] [--dry-run]

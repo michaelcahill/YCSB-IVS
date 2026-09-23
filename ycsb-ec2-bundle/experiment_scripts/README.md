@@ -274,8 +274,8 @@ family, `experiment_sample.sh`, and the array_json full-visibility stack
 (`run_postgresql_array_json_full_visibility.sh`, `experiment_postgresql_array_json.sh`,
 `benchmark_observability.py`) — is gone from the tree after an EC2 acceptance run of this
 runbook. Its instrumentation (WAL / `pg_stat_statements` / buffer-residency / prewarm
-capture) was discarded by design, not ported (`REFACTOR_PLAN.md` §4); the jsonb schema it
-benchmarked is `./experiment.sh postgresql_json`.
+capture) was discarded by design, not ported — the harness deliberately has no code path for
+it; the jsonb schema it benchmarked is `./experiment.sh postgresql_json`.
 
 An old run can still be reproduced from the annotated tag `pre-refactor-scripts`
 (`git worktree add ../pre-refactor pre-refactor-scripts`); existing full-visibility

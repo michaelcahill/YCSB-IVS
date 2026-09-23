@@ -10,7 +10,7 @@
 # _postgresql_common.sh, exactly like the other PostgreSQL backends.
 #
 # This module is the *data model* of the legacy experiment_postgresql_array_json.sh and
-# nothing else (REFACTOR_PLAN.md §4): its phase loop, watcher, statistics columns, key-size
+# nothing else: its phase loop, watcher, statistics columns, key-size
 # pipeline and results CSV are the shared ones, so runs are directly comparable with the
 # sibling backends. The two deliberate differences from that script are
 #   * the results CSV carries the full PostgreSQL statistics column set instead of its
