@@ -184,10 +184,13 @@ config::init_defaults() {
     # read db.url/db.user/db.passwd, other bindings namespace them (postgrenosql.url, …), and
     # some name them without any prefix at all - neo4j reads url/username/password, so the three
     # full names are the contract point and the prefix only supplies their defaults.
+    # `${VAR-default}`, not `${VAR:-default}`: a backend may also *remove* one of the three by
+    # setting it to the empty string, because the binding has no such property (couchbase2 reads
+    # no username - SDK 2.x authenticates as the bucket itself).
     BINDING_PARAM_PREFIX="${BINDING_PARAM_PREFIX:-db}"
-    BINDING_PARAM_URL="${BINDING_PARAM_URL:-${BINDING_PARAM_PREFIX}.url}"
-    BINDING_PARAM_USER="${BINDING_PARAM_USER:-${BINDING_PARAM_PREFIX}.user}"
-    BINDING_PARAM_PASSWD="${BINDING_PARAM_PASSWD:-${BINDING_PARAM_PREFIX}.passwd}"
+    BINDING_PARAM_URL="${BINDING_PARAM_URL-${BINDING_PARAM_PREFIX}.url}"
+    BINDING_PARAM_USER="${BINDING_PARAM_USER-${BINDING_PARAM_PREFIX}.user}"
+    BINDING_PARAM_PASSWD="${BINDING_PARAM_PASSWD-${BINDING_PARAM_PREFIX}.passwd}"
 
     # Dialect of the per-second runtime sampler (watcher.sh). It speaks one database's stats
     # views; a backend that does not name one here gets OS-level sampling only, and no

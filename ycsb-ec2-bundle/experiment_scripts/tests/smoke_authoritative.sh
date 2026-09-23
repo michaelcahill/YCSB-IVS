@@ -90,6 +90,10 @@ done
 
 echo "[smoke] target=$TARGET_SCRIPT"
 echo "[smoke] database=$DB_HOST:$DB_PORT user=$DB_USERNAME (dbs: $DB_NAME, $UNCHANGED_DB_NAME, $BACKUP_DB_NAME)"
+# "this run created nothing under ../workloads" has to be a before/after comparison: untracked
+# leftovers of earlier manual runs are dirt in the working tree, not a regression of this run.
+WORKLOAD_UNTRACKED_BEFORE="$(git -C "$SCRIPTS_DIR" ls-files --others --exclude-standard -- ../workloads | sort)"
+
 echo "[smoke] workdir=$WORKDIR"
 
 set +e
@@ -105,7 +109,7 @@ echo "[smoke] experiment exit status=$rc"
 # inside the experiment directory.
 echo "[smoke] checking that tracked workloads were not modified"
 if git -C "$SCRIPTS_DIR" diff --quiet -- ../workloads \
-   && [[ -z "$(git -C "$SCRIPTS_DIR" ls-files --others --exclude-standard -- ../workloads)" ]]; then
+   && [[ "$(git -C "$SCRIPTS_DIR" ls-files --others --exclude-standard -- ../workloads | sort)" == "$WORKLOAD_UNTRACKED_BEFORE" ]]; then
     echo "[smoke] ../workloads untouched"
 else
     echo "[smoke] FAILED: the run modified tracked files under ../workloads" >&2

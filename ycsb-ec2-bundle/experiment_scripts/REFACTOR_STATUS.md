@@ -2,11 +2,12 @@
 
 Plan: [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) · Branch: `refactor/experiment-scripts`
 Last updated: **steps 1–4 complete; step 5 in progress (all PostgreSQL backends,
-**mariadb_innodb, mongodb and neo4j done, verified end-to-end)** — one runner (`experiment.sh <backend>`),
-six verified backends behind shared modules, an engine that calls nothing but `backend::*`, a
-layered config layer with a legacy-launcher alias shim, and **workload files are read-only
-templates** (one generated file per phase in the experiment directory). Goldens unchanged apart
-from the intended `-P` paths.
+**mariadb_innodb, mongodb, neo4j and couchbase done, verified end-to-end)** — one runner
+(`experiment.sh <backend>`), seven verified backends behind shared modules, an engine that calls
+nothing but `backend::*`, a layered config layer with a legacy-launcher alias shim, and
+**workload files are read-only templates** (one generated file per phase in the experiment
+directory). Goldens unchanged apart from the intended `-P` paths. Only **mariadb_rocksdb** is left
+in step 5, and it needs a MariaDB build with the RocksDB engine (absent from the stock image).
 
 Read this file first after an interruption. Append to the **Log** at every meaningful
 checkpoint, and keep the **Step status** table current.
@@ -23,7 +24,7 @@ checkpoint, and keep the **Step status** table current.
 | psql/createdb/dropdb/pg_dump | ✅ PG 18.6 client | satisfies the scripts' PG18 preflight |
 | `jdbc-array` binding jar | ⚠️ not built | `jdbc-array/target/` absent; build: `mvn -o -Psource-run -pl site.ycsb:jdbc-array-binding -am package -DskipTests` (log `/tmp/mvn-jdbc-array.log`) |
 | Other module jars | ✅ present | `core/target/core-0.18.0-SNAPSHOT.jar`, `jdbc/`, `jdbc-array-json/`, `postgrenosql/` |
-| shellcheck | ✅ installed (2026-09-24) | `tools/check_scripts.sh` now runs it: the harness (`lib/`, `experiment.sh`, `tests/`, `tools/`) must be clean, 14 legacy scripts warn without failing (list only shrinks; `SHELLCHECK_STRICT=1` fails on everything). SC2034/SC2154 are excluded globally because these scripts share globals across sourced files |
+| shellcheck | ✅ installed (2026-09-24) | `tools/check_scripts.sh` now runs it: the harness (`lib/`, `experiment.sh`, `tests/`, `tools/`) must be clean, 12 legacy scripts warn without failing (list only shrinks; `SHELLCHECK_STRICT=1` fails on everything). SC2034/SC2154 are excluded globally because these scripts share globals across sourced files |
 | sudo | ❌ password required | cannot create PG roles or touch the server config; use the existing `ycsb` role |
 | podman | ✅ working, can pull images | found 2026-09-24: `podman run docker.io/library/mariadb:11` starts and answers on a published port (rootless). No docker, no local mariadb/mongo/neo4j/couchbase server binaries — containers are how the remaining backends can be smoke-tested here |
 | MariaDB container | ✅ up, backend verified | `ycsb_mariadb` = `docker.io/library/mariadb:11` (server 11.8.9) published on `-p 3307:3306`, role `ycsb` with global CREATE/DROP; endpoint + container wrap live in the **untracked** `conf/db.mariadb_innodb.env`, example file added |
@@ -31,6 +32,9 @@ checkpoint, and keep the **Step status** table current.
 | MongoDB container | ✅ up, backend verified | `ycsb_mongo` = `docker.io/library/mongo:5.0` on `-p 27017:27017`, no auth (like the legacy runners). No mongosh/mongodump/mongorestore on this host, so admin tools run through **`MONGO_CLI_WRAP=podman exec -i ycsb_mongo`** (tools 100.17 inside the image); endpoint + wrap in the untracked `conf/db.mongodb.env`, example file added. The `mongodb` binding is built and got a minimal `mongodb/conf/mongodb.properties` (it ships without a conf dir, but every YCSB invocation needs a properties file) |
 | Neo4j containers | ✅ up, backend verified | three instances, because Neo4j Community has **one user database per instance** and the study's three roles are main/backup/unchange: `ycsb_neo4j_{main,backup,unchange}` = `docker.io/library/neo4j:5` (5.26.31) on `-p 7687/7787/7887`, role `neo4j`, APOC enabled with file import/export, heap capped (`512M`/`128M` pagecache, `--memory=1400m`) because the host has little free RAM. cypher-shell only exists inside them → `NEO4J_CLI_WRAP_<ROLE>=podman exec -i …` + `NEO4J_CLI_BOLT_URI=bolt://localhost:7687`. The clean-run copy needs a **shared import directory**: podman volume `ycsb_neo4j_import` mounted at `/var/lib/neo4j/import` in all three, with a world-writable `tmp/` inside (`podman exec ycsb_neo4j_main mkdir -p -m 777 /var/lib/neo4j/import/tmp`). Endpoint + wraps + the full `podman run` line in the untracked `conf/db.neo4j.env`, example file added. All three containers use password **USyd2025** so one `DB_PWD=… tests/run_tests.sh` covers every backend |
 | Neo4j JDBC/Bolt driver | ✅ present | `neo4j/target/dependency/neo4j-java-driver-5.15.0.jar`, brought in by `mvn -o -pl site.ycsb:neo4j-binding -am package -DskipTests` (log `/tmp/mvn-neo4j.log`); the binding got a minimal `neo4j/conf/neo4j.properties` like mongodb |
+| Couchbase container | ✅ up, backend verified | `ycsb_couchbase` = **`docker.io/library/couchbase:community-7.6.2`** (the official image is in the `library/` namespace; `couchbase/community-edition` does not exist and 401s). Started with `--net=host`, which is what makes the SDK work: the cluster advertises `127.0.0.1` instead of a container IP. Initialized with `couchbase-cli cluster-init --services data,index,query` (the image has no auto-setup script and `cluster-init` takes no quota arguments in 7.6). Three buckets (`ycsb`, `ycsb_backup`, `ycsb_unchange`, `bucketType=membase`, `flushEnabled=1`) plus one **local RBAC user per bucket named exactly like it** — SDK 2.x sends the bucket name as the username, so `openBucket(bucket, pw)` cannot authenticate otherwise. The runner creates missing buckets/users itself (`COUCHBASE_CREATE_MISSING_BUCKETS=1`), so a fresh cluster works; endpoint + credentials in the untracked `conf/db.couchbase.env`, example file added |
+| Java SDK 2.3.1 vs Couchbase 7.6 | ✅ verified | `mvn -o -Psource-run -pl site.ycsb:couchbase2-binding -am package -DskipTests` builds it (`couchbase2/target/dependency/java-client-2.3.1.jar`); insert/read/**extend** through the couchbase2 binding against 7.6.2 all work, `couchbase.kv=false` (mutations via N1QL) included. The binding prefixes document ids with the table name, so keys are `usertable:user…` — that is also what `META().id` returns and what `USE KEYS` accepts (checked: a delete really removes the document) |
+| Containers from earlier sessions | ⚠️ had to be recreated | this host kept no containers (`podman ps -a` was empty); mariadb/mongo/neo4j were restarted from the `podman run` lines documented in each untracked `conf/db.<backend>.env`, and **the MariaDB benchmark role needs more than CREATE/DROP** — the load phase inserts, so `GRANT ALL PRIVILEGES ON *.* TO 'ycsb'@'%'` (note added to that file) |
 
 Note: the smoke suite needs the `jdbc-array` binding built once:
 `mvn -o -pl site.ycsb:jdbc-array-binding -am package -DskipTests` (already done here).
@@ -51,6 +55,7 @@ DB_PWD=USyd2025 bash tests/smoke_authoritative.sh # real PG18 end-to-end vs gold
 DB_PWD=USyd2025 bash tests/smoke_backend.sh mariadb_innodb  # structural check, any reachable backend
 bash tests/smoke_backend.sh mongodb                 # needs the ycsb_mongo container, no DB_PWD
 bash tests/smoke_backend.sh neo4j                   # needs the three ycsb_neo4j_* containers
+bash tests/smoke_backend.sh couchbase               # needs the ycsb_couchbase container + conf/db.couchbase.env
 
 # is a server reachable for one backend? (what run_tests.sh uses to skip)
 ./experiment.sh mariadb_innodb --check
@@ -69,7 +74,7 @@ work directory is kept for inspection.
 | 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ✅ done | PG backend module (387 ln) with `backend::*` contract + legacy aliases; `lib/registry.sh` discovers and validates backends; `experiment.sh` is the single entry point; authoritative script is now a compatibility shim |
 | 3 | `config.sh` + `conf/` presets + alias shim + `--help/--dry-run/--list-backends` | DONE | layered config with `${VAR:-default}` everywhere and `config::derive_paths` last; flags `--var/--config/--epochs/--steps/--run-id/--type/--scale/--workload/--experiment-dir/--dry-run/--list-backends`; legacy alias shim (`DIST`, `WORK`, `UNCHANGE_DB_NAME`, `EXPERIMENT_EPOCHS`, `EXPERIMENT_RUNS_PER_EPOCH`, `DB_PASSWORD`, `FIELD_LENGTH_ORIGINAL`, `vacuum`, `EXTEND_*`/`RUN_*` proportions) with deprecation lines; `conf/scale.{heavy,light}.env`; 31 assertions in `tests/test_config_workload.sh`. `--mode baseline` / `--instrument` still rejected until steps 6 and 8b |
 | 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | DONE | `lib/workload.sh`: one immutable, provenance-tagged file per YCSB invocation; the 22 in-place `perl -i -p` rewrites and the `awk` strip are gone from `lib/lifecycle.sh`; preflight no longer needs a writable workload; smoke asserts `../workloads` stays clean and that all 8 phase files exist |
-| 5 | `lifecycle.sh` engine + backend ports (PG row -> postgrenosql -> mariadb x2 -> mongodb -> neo4j -> couchbase) | IN PROGRESS | **done:** engine drives only `backend::*`; PostgreSQL split into `_postgresql_common.sh` + `postgresql_textarray` / **`postgresql_row`** / **`postgrenosql`**, plus **`mariadb_innodb`** on `_mariadb_common.sh`, **`mongodb`** and **`neo4j`** - all six verified end-to-end; `experiment_postgresql.sh`, `experiment_postgresql_array.sh`, `experiment_postgrenosql.sh`, `experiment_mariadb_innodb.sh`, `experiment_mongodb.sh` and `experiment_neo4j.sh` are shims. **Remaining:** couchbase (podman containers available), mariadb_rocksdb (the stock MariaDB image has no RocksDB engine).
+| 5 | `lifecycle.sh` engine + backend ports (PG row -> postgrenosql -> mariadb x2 -> mongodb -> neo4j -> couchbase) | IN PROGRESS | **done:** engine drives only `backend::*`; PostgreSQL split into `_postgresql_common.sh` + `postgresql_textarray` / **`postgresql_row`** / **`postgrenosql`**, plus **`mariadb_innodb`** on `_mariadb_common.sh`, **`mongodb`**, **`neo4j`** and **`couchbase`** - all seven verified end-to-end; `experiment_postgresql.sh`, `experiment_postgresql_array.sh`, `experiment_postgrenosql.sh`, `experiment_mariadb_innodb.sh`, `experiment_mongodb.sh`, `experiment_neo4j.sh` and `experiment_couchbase.sh` are shims. **Remaining:** mariadb_rocksdb (the stock MariaDB image has no RocksDB engine - it needs a purpose-built image, or it stays unverified).
 | 6 | `--mode baseline`; delete legacy `*_baseline.sh` | ⬜ pending | |
 | 7 | `tools/bundle.sh`, `tools/deploy.sh`, README rewrite, gitignore | ⬜ pending | |
 | 8a | `postgresql_json` backend | ⬜ pending | |
@@ -80,7 +85,7 @@ Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked
 
 ## Where to resume
 
-Five backends are on the new architecture and pass an end-to-end run here: the engine calls
+Seven backends are on the new architecture and pass an end-to-end run here: the engine calls
 nothing but `backend::*`, the PostgreSQL specifics live in `lib/backends/_postgresql_common.sh`
 plus one file per schema (`postgresql_textarray`, `postgresql_row`, `postgrenosql`) and the
 MariaDB specifics in `lib/backends/_mariadb_common.sh` plus `mariadb_innodb`. Every ported
@@ -89,9 +94,12 @@ backend is listed in `BACKEND_SMOKES` in `tests/run_tests.sh`, which asks
 in the world to be up, while `REQUIRE_DB=1` still fails when a *required* backend (the
 PostgreSQL family) is unreachable.
 
-Next: **couchbase**, and mariadb_rocksdb last (no RocksDB storage engine
-in the stock MariaDB image - it needs a purpose-built image or stays unverified).
-Six backends are in `BACKEND_SMOKES`, so any of them can be re-verified with
+Next: **mariadb_rocksdb** - the last script of step 5. It is a MariaDB variant, so
+`_mariadb_common.sh` covers most of it, but the stock `docker.io/library/mariadb:11` image has no
+RocksDB storage engine, so either a purpose-built image is found or the port ships unverified
+(no shim, no deletion - same rule as before). Its legacy runner is still in
+`LEGACY_WITH_WARNINGS`. Steps 6-8 after that.
+All seven are in `BACKEND_SMOKES`, so any of them can be re-verified with
 `bash tests/smoke_backend.sh <backend>` once its server answers.
 
 0. **Asking whether a backend is usable here:** `./experiment.sh <backend> --check` runs that
@@ -110,7 +118,7 @@ Six backends are in `BACKEND_SMOKES`, so any of them can be re-verified with
    `lib/metrics.sh` keeps only CPU/memory sampling of `host_os_user`. A hygiene test fails if
    PostgreSQL names reappear in core.
 3. Port one at a time: ~~postgrenosql~~ -> ~~mariadb_innodb~~ -> ~~mongodb~~ -> ~~neo4j~~ ->
-   couchbase -> mariadb_rocksdb. A ported backend gets its module, its legacy script becomes a one-line
+   ~~couchbase~~ -> mariadb_rocksdb. A ported backend gets its module, its legacy script becomes a one-line
    shim (which also leaves `LEGACY_WITH_WARNINGS` in `tools/check_scripts.sh`), and it joins
    `BACKEND_SMOKES` only once a server answers for it here; otherwise the module stays
    unverified and the legacy script is left alone (no shim, no deletion).
@@ -131,10 +139,17 @@ Facts that save time when resuming:
   (`registry::required_functions`): `info`, `default_config`, `preflight`, `init_db`,
   `collect_metrics`, `key_sizes`, `total_size`, `list_keys`, and since this checkpoint also
   `sample_key`, `explain_sql`, `delete_keys`, `truncate`. Optional ones get no-op defaults:
-  `vacuum`, `wait_idle`, `dump_restore`, `close`, `parse_args`. Capabilities a backend
-  declares in `backend::info` decide what the engine attempts at all
+  `vacuum`, `wait_idle`, `dump_restore`, `close`, `parse_args`, `extra_binding_params`.
+  Capabilities a backend declares in `backend::info` decide what the engine attempts at all
   (`supports_vacuum`, `supports_query_plan`, `has_dump_restore`, `runtime_watcher_dialect`,
   `host_os_user`, `min_server_version[_num]`).
+- A binding that reads more than a connection is expressible without touching the engine:
+  `backend::extra_binding_params` prints further `-p key=value` pairs (one per line) that
+  `binding_db_params` appends to **every** YCSB invocation, and a `BINDING_PARAM_*` name set to
+  the empty string means "this binding has no such property" (`config.sh` therefore uses
+  `${VAR-default}`, not `${VAR:-default}`). couchbase2 is the first user of both: it needs
+  host/adhoc/kv/boost/core-retries and reads no username, because SDK 2.x authenticates as the
+  bucket itself. Empty for every other backend, which is why the goldens did not move.
 - `backend::total_size`, `key_sizes`, `list_keys` are what the size/verification code calls
   now; a schema module only supplies `backend::size_expression`, which those helpers embed.
 - Two engine-side operations were moved into the backend because their SQL is the whole point:
@@ -142,6 +157,54 @@ Facts that save time when resuming:
   (`delete_keys`). Both are gated on capabilities so a backend that cannot explain a plan just
   skips that step.
 - Run everything with `DB_PWD=USyd2025 REQUIRE_DB=1 bash tests/run_tests.sh`.
+
+## Findings during step 5 (couchbase, and what an HTTP-only backend needs)
+
+1. **No CLI wrap.** couchbase.sh is the first backend whose admin interface is HTTP: management
+   through `curl` on 8091 and N1QL on 8093. Unlike neo4j/mongodb there is nothing to run inside
+   the server's container, so a remote or containerised cluster needs configuration only - and
+   the two failure modes are an HTTP status (`COUCHBASE_HTTP_STATUS`, set by `couchbase::rest`)
+   and a N1QL `errors[]` entry, both of which are logged without credentials.
+2. **A bucket name is an authentication identity.** SDK 2.x has no username property, so every
+   bucket needs a local RBAC user named exactly like it. `backend::init_db` creates the bucket
+   *and* that user when they are missing (`COUCHBASE_CREATE_MISSING_BUCKETS=1`, default), and
+   preflight probes the credential the **binding** will use (write+delete of one probe document,
+   via `UPSERT` so an interrupted run cannot leave a duplicate-key failure behind). Setting it to
+   0 restores "provision three buckets and three users beforehand", which is what the EC2 hosts
+   did; then preflight fails instead of writing anything.
+3. **N1QL is eventually consistent, so `status: success` proves nothing twice over.** An
+   `INSERT ... SELECT` whose SELECT matches no row succeeds, and reading a count right after a
+   write can return a stale number (measured: 19 documents copied, first read said 12). Both the
+   copy to the comparison bucket and every flush therefore *poll* until the counts agree
+   (`CONSISTENCY_TIMEOUT_SEC`), which is also what `backend::wait_empty` is for. The legacy
+   runner checked neither.
+4. **Two N1QL syntax traps hit while writing this:** `INSERT INTO b (KEY "k", VALUE {...})` is a
+   syntax error - only the SELECT variant takes that form, `VALUES` needs
+   `(KEY, VALUE) VALUES (...)`; and an object literal must not be parenthesised.
+5. **Keys are prefixed with the table name** (`formatId(table, key)` → `usertable:user…`). That
+   is what `META().id` returns and what `DELETE … USE KEYS [...]` accepts - verified by counting
+   documents after a measured phase, so unlike the neo4j quoting bug the cleanup really deletes.
+   `backend::delete_keys` batches (default 500 keys per statement) instead of sending one
+   statement per run phase like the legacy script.
+6. **The statistics columns are 22 literal zeros**, kept in the legacy order because that is what
+   Couchbase has no equivalent of; a new test asserts them against
+   `experiment_couchbase_baseline.sh`'s header for every backend whose legacy script is still in
+   the tree (couchbase, mariadb_innodb, mongodb). Real bucket counters (itemCount/disk/data/RAM)
+   go to the run log instead of the CSV.
+7. **Deliberate deviation from the legacy runner:** no `insertstart`/`recordcount` rewriting when
+   a bucket cannot be flushed - shifting the key range changes what is measured, so the fallback
+   is `DELETE FROM <bucket>` and, failing that, an error.
+
+## Findings during step 5 (harness fixes found by the couchbase port)
+
+1. **"`../workloads` must stay clean" was a whole-tree assertion**: both smoke scripts failed on
+   *any* untracked file there, so leftovers of earlier manual runs (`workloads/workloada-extend-small`
+   is one, and `git status` also shows stray `*.osstats`/`key_sizes_*.csv` output in
+   `experiment_scripts/`) turned a green run red. They now snapshot the untracked list before the
+   run and compare after, which is what "this run created nothing" actually means.
+2. `tests/smoke_backend.sh` still cannot tell a *skipped* cleanup from a working one for non-
+   PostgreSQL dialects - unchanged here, but note that couchbase adds nothing: its buckets are
+   emptied by the runner itself in `init_db`.
 
 ## Findings during step 5 (who owns the results CSV schema)
 
@@ -299,11 +362,58 @@ Facts that save time when resuming:
   (pre-existing, also on `master`). Widening the list adds lines to every future log and needs
   the goldens re-captured - do it, or keep the current log shape?
 
+- **Couchbase's 22 statistics columns are literal zeros** (`blks_read` … `wal_buffers_full`), kept
+  from the legacy runner so its CSV stays comparable. They carry no information and their names
+  belong to another database. Options: keep as-is (comparable, honest about nothing), or replace
+  them with real Couchbase counters (`itemCount`, `diskUsed`, `dataUsed`, `memUsed`, ops/sec from
+  the bucket REST API) which changes that backend's CSV schema and would need the analysis scripts
+  checked. Currently kept, with the real numbers logged per phase instead. Same question applies
+  to neo4j's mostly-zero 19 columns - decide once, for both.
+
 - Should `conf/db.postgresql.env` be committed as a template (`conf/db.postgresql.env.example`)
   with real credentials kept out of git? (Plan says credentials stay out of tracked files.)
 - EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.
 
 ## Log
+
+### 2026-09-23 — step 5b: couchbase backend (verified end-to-end)
+
+- `lib/backends/couchbase.sh` (management REST + N1QL helpers, bucket/user provisioning, preflight,
+  copy, size helpers, contract) + `conf/db.couchbase.env.example` + a minimal
+  `couchbase2/conf/couchbase.properties` (deliberately assigning nothing - every value the runner
+  controls is passed with `-p`, so it shows up in the YCSB banner). `experiment_couchbase.sh` is a
+  one-line shim and left `LEGACY_WITH_WARNINGS` (12 legacy scripts remain); `couchbase` joined
+  `BACKEND_SMOKES`. Verified against **Couchbase Community 7.6.2** in podman: value size grows
+  200000 → 230000 across extend, the reference bucket stays at 200000, the comparison copy reports
+  the same 230000 and the average-field-length reload lands back on 230000; each of the three
+  buckets holds exactly `recordcount` documents when the run ends, i.e. the inserted keys really
+  were removed. Results CSV: 44 columns = base + CPU/Memory + the legacy 22 statistics columns.
+- **Environment:** `docker.io/library/couchbase:community-7.6.2` (there is no
+  `couchbase/community-edition` repository - it 401s), `--net=host` so the cluster advertises
+  `127.0.0.1`, `cluster-init --services data,index,query`, three buckets with flush enabled and
+  one local RBAC user per bucket. Java client 2.3.1 talks to server 7.6 without changes, insert,
+  read and extend all through the couchbase2 binding with `couchbase.kv=false`.
+- **New contract points** (engine + config, both no-ops for every other backend):
+  `backend::extra_binding_params` appends further `-p` properties to each YCSB invocation, and an
+  empty `BINDING_PARAM_USER` means the binding has no username property. See "Facts that save
+  time".
+- **Deviations from the legacy runner** (all in the module header): no insertstart/recordcount
+  shifting when flush is refused (DELETE FROM instead, then error); one bucket password for all
+  three roles, because `binding_db_params` sends exactly one per phase and the legacy defaults
+  were all equal; the comparison copy is verified by document count; buckets/users may be created
+  by the runner unless `COUCHBASE_CREATE_MISSING_BUCKETS=0`.
+- **Bug class found by running it:** N1QL reports success for a copy that transferred nothing, and
+  counts read back can lag behind writes - so both the flush and the copy poll until they agree.
+  The legacy script trusted `status: success` alone.
+- Also fixed while testing: both smoke suites treated *any* untracked file under `../workloads` as
+  a failure, which made them red because of leftovers from earlier manual runs; they now compare
+  before/after (see the findings section).
+- Suite: static checks PASS (12 legacy warnings) - 41 shell + 7 python tests OK (the new guard
+  compares three backends' statistics columns with their legacy headers) - authoritative smoke PASS
+  against unchanged goldens - **all six** structural smokes PASS (`postgresql_row`,
+  `postgrenosql`, `mariadb_innodb`, `mongodb`, `neo4j`, `couchbase`) with
+  `DB_PWD=USyd2025 REQUIRE_DB=1 bash tests/run_tests.sh`.
+
 
 ### 2026-09-23 — step 5b: neo4j backend (verified end-to-end)
 

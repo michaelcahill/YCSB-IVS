@@ -39,14 +39,21 @@ run_ycsb() {
 # prefix) and BINDING_PARAM_CREDENTIALS says whether to send any. Sets the global DB_PARAMS
 # array; every YCSB invocation expands it.
 binding_db_params() {
-    local url="${1:?database url required}"
+    local url="${1:?database url required}" extra
     DB_PARAMS=(-p "${BINDING_PARAM_URL:-db.url}=$url")
     if [[ "${BINDING_PARAM_CREDENTIALS:-1}" == 1 ]]; then
-        DB_PARAMS+=(
-            -p "${BINDING_PARAM_USER:-db.user}=$DB_USERNAME"
-            -p "${BINDING_PARAM_PASSWD:-db.passwd}=$DB_PWD"
-        )
+        # A property name may be empty when the binding has no such property: couchbase2 sends no
+        # username at all (SDK 2.x authenticates as the bucket), so only its password goes out.
+        [[ -n "${BINDING_PARAM_USER-db.user}" ]] && DB_PARAMS+=(-p "${BINDING_PARAM_USER-db.user}=$DB_USERNAME")
+        [[ -n "${BINDING_PARAM_PASSWD-db.passwd}" ]] && DB_PARAMS+=(-p "${BINDING_PARAM_PASSWD-db.passwd}=$DB_PWD")
     fi
+    # Optional hook: further `-p key=value` properties a binding needs to be told about on every
+    # invocation (couchbase2: host, adhoc/kv/boost, core's insertion retries). Empty by default,
+    # so for every other backend the command line is unchanged.
+    while IFS= read -r extra; do
+        [[ -n "$extra" ]] && DB_PARAMS+=(-p "$extra")
+    done < <(backend::extra_binding_params)
+    return 0
 }
 
 run_with_metrics() {

@@ -71,6 +71,10 @@ registry::load() {
     declare -F backend::truncate     >/dev/null|| eval 'backend::truncate() { :; }'
     declare -F backend::close        >/dev/null|| eval 'backend::close() { :; }'
     declare -F backend::parse_args   >/dev/null|| eval 'backend::parse_args() { return 0; }'
+    # Extra `-p key=value` properties for every YCSB invocation; only bindings that read more
+    # than a connection need it (couchbase2: host, adhoc/kv/boost, insertion retries).
+    declare -F backend::extra_binding_params >/dev/null ||
+        eval 'backend::extra_binding_params() { :; }'
 }
 
 # registry::info KEY -> value from the active backend's metadata.

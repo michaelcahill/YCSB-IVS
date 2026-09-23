@@ -259,6 +259,38 @@ for backend in $(registry::available); do
     fi
 done
 
+# Statistics columns are a backend's results-CSV schema, and the whole point of keeping them is
+# comparability with the runs made before the refactor. Where a legacy script for a ported
+# backend still exists in the tree, its header is the specification.
+legacy_csv_columns() {   # <file> -> the statistics columns of that runner's results CSV
+    local file="$1" header
+    header=$(grep -m1 -E '^\s*(base_)?header="Epoch,Phase,' "$file") || return 1
+    header=${header#*Operation,}
+    header=${header%%,Readprop*}
+    header=${header#CPU,Memory,}
+    [[ "$header" == CPU,Memory ]] && header=''
+    printf '%s\n' "$header"
+}
+legacy_header_matches() {
+    local backend file names legacy
+    while read -r backend file; do
+        [[ -n "$backend" && -r "$SCRIPTS_DIR/$file" ]] || continue   # deleted with the legacy script
+        names=$(cd "$SCRIPTS_DIR" && source "lib/backends/$backend.sh" && backend::metric_names | paste -sd, -)
+        legacy=$(cd "$SCRIPTS_DIR" && legacy_csv_columns "$file")
+        if [[ "$names" != "$legacy" ]]; then
+            echo "backend $backend changed its statistics columns" >&2
+            echo "  new   : $names" >&2
+            echo "  legacy: $legacy" >&2
+            return 1
+        fi
+    done <<'PAIRS'
+couchbase experiment_couchbase_baseline.sh
+mariadb_innodb experiment_mariadb_innodb_baseline.sh
+mongodb experiment_mongodb_baseline.sh
+PAIRS
+}
+(cd "$SCRIPTS_DIR" && legacy_header_matches) && ok || bad "statistics columns still match the legacy headers (rc=$?)"
+
 # The engine must stay backend-independent: no PostgreSQL spellings, and no writes to
 # workload files (the two things that made the legacy scripts unmaintainable).
 engine_hygiene() {

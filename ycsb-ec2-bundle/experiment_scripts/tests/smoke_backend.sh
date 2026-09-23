@@ -83,6 +83,10 @@ if [[ "$DB_DIALECT" == postgresql ]] && command -v dropdb >/dev/null 2>&1; then
 fi
 
 echo "[backend-smoke] backend=$BACKEND endpoint=${DB_HOST:-<backend default>:${DB_PORT:-?}} user=${DB_USERNAME:-<backend default>}"
+# "the run created nothing under ../workloads" has to be a before/after comparison: untracked
+# leftovers of earlier manual runs are dirt in the working tree, not a regression of this run.
+WORKLOAD_UNTRACKED_BEFORE="$(git -C "$SCRIPTS_DIR" ls-files --others --exclude-standard -- ../workloads | sort)"
+
 echo "[backend-smoke] workdir=$WORKDIR"
 
 set +e
@@ -151,7 +155,9 @@ echo "[backend-smoke] generated workloads: $(find "$EXPERIMENT_DIR/workloads" -n
 
 git -C "$SCRIPTS_DIR" diff --quiet -- ../workloads \
     || fail "tracked files under ../workloads were modified"
-[[ -z "$(git -C "$SCRIPTS_DIR" ls-files --others --exclude-standard -- ../workloads)" ]] \
-    || fail "new files appeared under ../workloads"
+if [[ "$(git -C "$SCRIPTS_DIR" ls-files --others --exclude-standard -- ../workloads | sort)" != \
+      "$WORKLOAD_UNTRACKED_BEFORE" ]]; then
+    fail "new files appeared under ../workloads"
+fi
 
 echo "[backend-smoke] PASS — $BACKEND completed the standard phase sequence"
