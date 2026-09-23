@@ -275,7 +275,7 @@ collect_postgres_metrics() {
 			log "DB statistics $relssizestats"
 		done <<< "$size_output"
 	fi
-	
+
     log "END statistics snapshot database=$db statistics=${#names[@]} relsizes=$relsizes"
 }
 
@@ -453,7 +453,6 @@ run_with_metrics() {
     local rc=0
     local started=$SECONDS
     local pg_1s_file=""
-    local os_1s_file=""
     local run_buffer_sampler_pid=""
     local operation_count=""
     local wal_start_lsn=""
@@ -462,6 +461,8 @@ run_with_metrics() {
 
     metrics_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.metrics"
     db_stats_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.dbstats"
+    disk_stats_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.diskstats"
+    os_1s_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.osstats"
     details_file="stepdetail_logs/${LOG_FILE%.log}_epoch${epoch:-0}_${phase}.log"
 
     echo "Starting metrics collection for $db_name"
@@ -480,7 +481,7 @@ run_with_metrics() {
         DB_STATS_FILE="$db_stats_file" \
         PG_1S_FILE="$pg_1s_file" \
         OS_1S_FILE="$os_1s_file" \
-        OS_DISK_DEVICE_FILE="" \
+        OS_DISK_DEVICE_FILE="$disk_stats_file" \
         OS_DISK_DEVICES="$OS_DISK_DEVICES" \
         DB_STATS_TABLE="$TARGET_TABLE" \
         DB_STATS_INTERVAL="$DB_STATS_INTERVAL" \
@@ -550,7 +551,7 @@ mkdir -p "$(dirname "$OUTPUT_FILE")" \
 rm -rf $KEY_SIZE_LOG
 rm -f "$KEY_SIZE_FILE_AFTER_EXTEND" "$KEY_SIZE_FILE_AFTER_RUN"
 
-# Function to write results as a csv 
+# Function to write results as a csv
 write_result() {
     local first="$1" field_name postgres_stats_csv base_header previous temp_result r
     local -a postgres_stats=("$cpu" "$memory")
@@ -765,7 +766,7 @@ for epoch in $(seq 1 10); do
             -p postgrenosql.user="$DB_USERNAME" \
             -p postgrenosql.passwd="$DB_PWD" \
             -p fieldlengthhistogram="$HISTOGRAM_FILE"
-        
+
         # Extract extend failure count from YCSB output (status messages are in the output)
         extend_failed_count=$(grep -oP 'EXTEND-FAILED: Count=\K\d+' "$OUTPUT_CSV" | head -1 || echo "0")
         if [ -n "$extend_failed_count" ] && [ "$extend_failed_count" != "0" ]; then
@@ -775,7 +776,7 @@ for epoch in $(seq 1 10); do
                 exit 1
             fi
         fi
-        
+
         collect_cpu_memory_metrics
         collect_postgres_metrics $DB_NAME
         write_result "FALSE"
@@ -788,7 +789,7 @@ for epoch in $(seq 1 10); do
             octet_length(ycsb_value::text) AS size
             FROM usertable;" \
         >> "$KEY_SIZE_LOG"
-        
+
         # Verify extend operations: check min, max, avg sizes to detect extension failures
         extend_stats=$(awk -F, '
             NR == 1 { next }
@@ -993,10 +994,10 @@ for epoch in $(seq 1 10); do
         done < "$KEYS_TO_DELETE_FILE" | PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$UNCHANGE_DB_NAME"
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
-    
+
         if (( $((10*($epoch-1)+$run)) % 1 == 0 )); then
             phase="clean-run"
-            
+
             log "Backing up the database started"
             RESTORE_LOG="${LOG_DIR}/restore_logs/${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_run${run}_restore.log"
             restore_comparison_database
@@ -1029,7 +1030,7 @@ for epoch in $(seq 1 10); do
                 octet_length(ycsb_value::text) AS size
                 FROM usertable;" \
             >> "$KEY_SIZE_LOG"
-            
+
             # Check if the output file exists, if not, create it with headers
             iteration=$((10*($epoch-1)+$run))
             if [[ ! -f "$KEY_SIZE_FILE_AFTER_RUN" ]]; then
@@ -1080,12 +1081,12 @@ for epoch in $(seq 1 10); do
             phase="comparison-load"
             log "=== Executing the load phase for the comparison study ==="
             run_ycsb "comparison-load" "${iteration}" load "$YCSB_BINDING" -s -P "$WORKLOAD_FILE" -P "$NOSQL_PROPERTIES" -p postgrenosql.url="$BACKUP_URL" -p postgrenosql.user="$DB_USERNAME" -p postgrenosql.passwd="$DB_PWD"
-            
+
             # Verify record sizes after avg-run load
             iteration=$((10*($epoch-1)+$run))
             total_size_avg_run=$(PGPASSWORD="$DB_PWD" psql -U "$DB_USERNAME" -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(ycsb_value::text)) FROM usertable;")
             log "Avg-run verification - Epoch:$epoch Run:$run Iteration:$iteration TotalSize:$total_size_avg_run ExpectedFieldLength:$fieldlengthaverage"
-            
+
             # Keep fieldlength at the newly computed average for this run.
             source "$WORKLOAD_FILE"
 
