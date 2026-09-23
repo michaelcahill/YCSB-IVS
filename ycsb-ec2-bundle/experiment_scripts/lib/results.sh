@@ -3,17 +3,18 @@
 
 # Results CSV writer: merges previously stored rows with the YCSB summary just
 # parsed from $INPUT_FILE, widening the header when a new measurement label
-# appears. Column order is metrics.sh's binding_field_names plus the base header.
+# appears. Column order is the backend's metric names (metrics::header) plus the
+# base header.
 write_result() {
-    local first="$1" field_name postgres_stats_csv base_header previous temp_result r
-    local -a postgres_stats=("$cpu" "$memory")
-    for field_name in "${binding_field_names[@]}"; do
-        postgres_stats+=("${!field_name}")
+    local first="$1" field_name stats_csv base_header previous temp_result r
+    local -a stats_values=("$cpu" "$memory")
+    for field_name in "${metric_field_names[@]}"; do
+        stats_values+=("${!field_name}")
     done
-    postgres_stats_csv=$(IFS=','; echo "${postgres_stats[*]}")
+    stats_csv=$(IFS=','; echo "${stats_values[*]}")
     r=$((STEPS_PER_EPOCH * (${epoch:-1} - 1) + ${step:-0}))
     [[ "$phase" != load ]] || r=0
-    base_header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,$stats_header,Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec)"
+    base_header="Epoch,Phase,Recordcount,Readallfields,Requestdist,Operation,$(metrics::header),Readprop,Updateprop,Scanprop,Insertprop,Extendprop,Runtime(ms),Throughput(ops/sec)"
     previous="$OUTPUT_FILE"
     [[ "$first" != TRUE ]] || previous=/dev/null
     temp_result=$(mktemp "${OUTPUT_FILE}.tmp.XXXXXX")
@@ -22,7 +23,7 @@ write_result() {
         -v step="$r" -v phase="$phase" -v records="${recordcount:-}" \
         -v allfields="${readallfields:-}" -v distribution="${requestdistribution:-}" \
         -v readdist="${readrequestdistribution:-}" -v updatedist="${updaterequestdistribution:-}" \
-        -v stats="$postgres_stats_csv" -v readprop="${readproportion:-}" \
+        -v stats="$stats_csv" -v readprop="${readproportion:-}" \
         -v updateprop="${updateproportion:-}" -v scanprop="${scanproportion:-}" \
         -v insertprop="${insertproportion:-}" -v extendprop="${extendproportion:-}" '
         function trim(x) { sub(/^[[:space:]]+/, "", x); sub(/[[:space:]]+$/, "", x); return x }

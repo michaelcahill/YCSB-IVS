@@ -74,12 +74,11 @@ but `backend::*`, the PostgreSQL specifics live in `lib/backends/_postgresql_com
 one file per schema (`postgresql_textarray`, **`postgresql_row`**), and both backends pass an
 end-to-end run here. Next up is **step 5b, continuing with postgrenosql**.
 
-1. Before porting a non-PostgreSQL backend: the results-CSV statistics columns are still
-   PostgreSQL-specific (`binding_field_names` / `stats_header` in `lib/metrics.sh`, plus
-   `collect_cpu_memory_metrics` sampling the `postgres` OS account). Move that into the
-   backend (`backend::metric_names`, `backend::stats_header`) with core keeping only
-   CPU/memory; otherwise every non-PostgreSQL CSV carries PG column names.
-2. Then port one at a time: postgrenosql -> mariadb_innodb -> mariadb_rocksdb -> mongodb ->
+1. Prerequisite for non-PostgreSQL backends is done: the statistics columns are owned by the
+   backend (`backend::metric_names`, defined in `_postgresql_common.sh`) and `lib/metrics.sh`
+   keeps only CPU/memory sampling of `host_os_user`. A new hygiene test fails if PostgreSQL
+   names reappear in core.
+2. Port one at a time: postgrenosql -> mariadb_innodb -> mariadb_rocksdb -> mongodb ->
    neo4j -> couchbase. Each needs a reachable server for `tests/smoke_backend.sh <backend>`;
    until then the module stays unverified and its legacy script is left in place (no shim, no
    deletion).
@@ -103,6 +102,17 @@ Facts that save time when resuming:
   `backend::size_expression` exist but are **unused so far** - they replace the inline 34x
   size SQL once the engine is rewired.
 - Run everything with `DB_PWD=USyd2025 REQUIRE_DB=1 bash tests/run_tests.sh`.
+
+## Findings during step 5 (who owns the results CSV schema)
+
+1. `lib/metrics.sh` no longer knows anything about databases: it samples CPU/memory for the
+   account named by the backend's `host_os_user` and builds the header from
+   `backend::metric_names`. The PostgreSQL column list moved to `_postgresql_common.sh`
+   (`metric_field_names`, renamed from the legacy `binding_field_names`).
+2. Goldens prove it is behaviour-preserving: the 74-column results CSV is byte-identical.
+3. Guard added: `tests/test_config_workload.sh` fails if `lib/metrics.sh` or `lib/results.sh`
+   mentions `pg_stat`, `blks_read`, `usertable_` or `postgres` (it also caught the leftover
+   `postgres_stats*` local names in `write_result`, now `stats_values`/`stats_csv`).
 
 ## Findings during step 5 (backends)
 
@@ -238,6 +248,15 @@ Facts that save time when resuming:
 - EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.
 
 ## Log
+
+### 2026-09-24 — step 5b: results-CSV schema belongs to the backend
+
+- `backend::metric_names` is the contract point for statistics columns; `_postgresql_common.sh`
+  provides the PG18 list (`metric_field_names`, ex `binding_field_names`). `lib/metrics.sh`
+  keeps CPU/memory only, sampling `host_os_user` from backend info.
+- `write_result` uses `metrics::header`; local variables renamed away from PostgreSQL wording.
+- New guard: core (`lib/metrics.sh`, `lib/results.sh`) must not mention PostgreSQL. Suite:
+  35 shell + 7 python tests OK, both smoke suites PASS, goldens byte-identical.
 
 ### 2026-09-24 — step 5b: postgresql_row backend, PostgreSQL specifics shared
 

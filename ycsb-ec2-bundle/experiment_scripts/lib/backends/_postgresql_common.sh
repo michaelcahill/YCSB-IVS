@@ -1,5 +1,50 @@
 PG_MAINTENANCE_DB="${PG_MAINTENANCE_DB:-postgres}"
 
+# ---------------------------------------------------------------------------
+# Statistics columns (the results CSV schema for this backend)
+#
+# PostgreSQL 18 statistics collected for every phase. metric_field_names is the full column
+# list of a scope=all snapshot and write_result emits it in this exact order, so adding a
+# metric here is what makes it appear in the results CSV.
+# ---------------------------------------------------------------------------
+
+global_metric_names=(
+    blks_read blks_hit tup_returned tup_fetched tup_inserted tup_updated
+    tup_deleted deadlocks temp_files temp_bytes checkpoints_timed checkpoints_req
+    checkpoints_done buffers_checkpoint buffers_clean buffers_alloc
+    checkpoint_write_time checkpoint_sync_time wal_bytes wal_records wal_fpi wal_buffers_full
+)
+
+table_metric_names=(
+    n_tup_upd n_live_tup n_dead_tup n_ins_since_vacuum vacuum_count autovacuum_count
+    total_vacuum_time total_autovacuum_time total_analyze_time total_autoanalyze_time
+)
+
+relsize_metric_names=(
+    relation_name relation_type raw_rel_size relation_size
+)
+
+metric_field_names=("${global_metric_names[@]}")
+
+for prefix in usertable toast; do
+    for metric in "${table_metric_names[@]}"; do
+        metric_field_names+=("${prefix}_${metric}")
+    done
+done
+
+metric_field_names+=(toast_n_tup_ins toast_n_tup_del)
+
+metric_field_names+=(
+    usertable_heap_blks_read usertable_heap_blks_hit usertable_idx_blks_read usertable_idx_blks_hit
+    toast_blks_read toast_blks_hit tidx_blks_read tidx_blks_hit
+)
+
+# backend::metric_names -> one CSV column per statistics measurement, in snapshot order.
+backend::metric_names() {
+    printf '%s\n' "${metric_field_names[@]}"
+}
+
+
 #!/usr/bin/env bash
 # Part of a PostgreSQL backend module; sourced by lib/backends/postgresql_*.sh.
 #
@@ -60,7 +105,7 @@ backend::collect_metrics() {
     local dbmetrics relssizestats relsizes
     
     if [[ "$scope" == all ]]; then
-        names=("${binding_field_names[@]}")
+        names=("${metric_field_names[@]}")
         for alias in u t; do
             for metric in "${table_metric_names[@]}"; do
                 extra_select+=", $alias.$metric"
@@ -196,8 +241,8 @@ backend::preflight() {
             return 1
         fi
     done
-    if ! ps -u postgres -o pid= >/dev/null; then
-        echo "[ERROR] Cannot sample the postgres OS account required by these runners." >&2
+    if ! ps -u "${HOST_OS_USER:-postgres}" -o pid= >/dev/null; then
+        echo "[ERROR] Cannot sample the ${HOST_OS_USER:-postgres} OS account required by these runners." >&2
         return 1
     fi
     local min_version="${MIN_SERVER_VERSION_NUM:-$(registry::info min_server_version_num)}"
@@ -357,5 +402,8 @@ postgresql::base_config() {
     BACKUP_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$BACKUP_DB_NAME"
     UNCHANGED_DB_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$UNCHANGED_DB_NAME"
     JDBC_PROPERTIES="${JDBC_PROPERTIES:-../jdbc-binding/conf/postgres.properties}"
+
+    # CPU/memory usage is sampled from the server's OS account.
+    HOST_OS_USER="${HOST_OS_USER:-$(registry::info host_os_user)}"
     BACKUP_FILE="${BACKUP_FILE:-./ycsb_dump.sql}"
 }

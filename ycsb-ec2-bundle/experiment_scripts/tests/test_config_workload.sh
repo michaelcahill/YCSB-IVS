@@ -268,5 +268,14 @@ engine_hygiene() {
 }
 (cd "$SCRIPTS_DIR" && engine_hygiene) && ok || bad "engine hygiene (rc=$?)"
 
+# The core must stay database-independent: no PostgreSQL column names outside the
+# PostgreSQL module, or a MongoDB/MariaDB results CSV would inherit them.
+core_hygiene() {
+    local hits
+    hits=$(grep -nE 'blks_read|tup_returned|usertable_|pg_stat|postgres' lib/metrics.sh lib/results.sh) || true
+    [[ -z "$hits" ]] || { echo "core knows about PostgreSQL: $hits" >&2; return 1; }
+}
+(cd "$SCRIPTS_DIR" && core_hygiene) && ok || bad "core database-independence (rc=$?)"
+
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$pass" "$fail"
 (( fail == 0 ))
