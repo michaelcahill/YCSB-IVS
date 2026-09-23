@@ -170,7 +170,7 @@ collect_postgres_metrics() {
     local extra_select="" extra_joins=""
     local -a values names=("${global_metric_names[@]}")
     local dbmetrics relssizestats relsizes
-    
+
     if [[ "$scope" == all ]]; then
         names=("${binding_field_names[@]}")
         for alias in u t; do
@@ -180,7 +180,7 @@ collect_postgres_metrics() {
         done
 
         extra_select+=", t.n_tup_ins, t.n_tup_del"
-        
+
         # toast_* and tidx_* belong to the PARENT row, not the TOAST row.
         extra_select+=", io.heap_blks_read, io.heap_blks_hit, io.idx_blks_read, io.idx_blks_hit,
                          io.toast_blks_read, io.toast_blks_hit, io.tidx_blks_read, io.tidx_blks_hit"
@@ -272,7 +272,7 @@ collect_postgres_metrics() {
 			log "DB statistics $relssizestats"
 		done <<< "$size_output"
 	fi
-	
+
     log "END statistics snapshot database=$db statistics=${#names[@]} relsizes=$relsizes"
 }
 
@@ -362,7 +362,7 @@ postgres_preflight() {
 
 restore_comparison_database() {
     local source_rows restored_rows
-    
+
     mkdir -p "$(dirname "$RESTORE_LOG")"
     : > "$RESTORE_LOG"
     source_rows=$(pg_exec -d "$DB_NAME" -At -c 'SELECT count(*) FROM usertable;') || return 1
@@ -509,7 +509,7 @@ wait_for_idle_postgres() {
         #    log "TIMEOUT WAIT FOR IDLE POSTGRES: $active_count backend(s) are still not idle."
         #    break
         #fi
-	    # 
+	    #
 	    # Variant B: Details Count
 	    active_backends=$(pg_exec -d "$database" -At -c \
        		"SELECT backend_type, query, query_start, wait_event, state FROM pg_stat_activity WHERE state != 'idle' AND pid != pg_backend_pid();")
@@ -525,7 +525,7 @@ wait_for_idle_postgres() {
         fi
         log "WAITING FOR IDLE POSTGRES - $active_count active processes: ${active_backends//$'\n'/$'\t'}"
     	sleep "$interval"
-	done	
+	done
 }
 
 run_ycsb() {
@@ -537,7 +537,7 @@ run_ycsb() {
 #    details_file="stepdetail_logs/${LOG_FILE%.log}_epoch${epoch:-0}_step${step:-0}_${label}"
     details_file="stepdetail_logs/${LOG_FILE%.log}_epoch${epoch:-0}_${label}.log"
     mkdir -p "$(dirname "$details_file")"
-    
+
     log "START YCSB $label"
 
     # Preserve raw output for CSV parsing and retain a separate detailed file.
@@ -562,9 +562,8 @@ run_with_metrics() {
     local epoch=$3
     local output_csv=$4
     local rc=0
-    local started=$SECONDS 
+    local started=$SECONDS
     local pg_1s_file=""
-    local os_1s_file=""
     local run_buffer_sampler_pid=""
     local operation_count=""
     local wal_start_lsn=""
@@ -573,6 +572,8 @@ run_with_metrics() {
 
     metrics_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.metrics"
     db_stats_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.dbstats"
+    disk_stats_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.diskstats"
+    os_1s_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.osstats"
     details_file="stepdetail_logs/${LOG_FILE%.log}_epoch${epoch:-0}_${phase}.log"
 
     echo "Starting metrics collection for $db_name"
@@ -591,7 +592,7 @@ run_with_metrics() {
         DB_STATS_FILE="$db_stats_file" \
         PG_1S_FILE="$pg_1s_file" \
         OS_1S_FILE="$os_1s_file" \
-        OS_DISK_DEVICE_FILE="" \
+        OS_DISK_DEVICE_FILE="$disk_stats_file" \
         OS_DISK_DEVICES="$OS_DISK_DEVICES" \
         DB_STATS_TABLE="$TARGET_TABLE" \
         DB_STATS_INTERVAL="$DB_STATS_INTERVAL" \
@@ -603,8 +604,8 @@ run_with_metrics() {
 
     log "START YCSB $phase"
 
-	# execute ycsb program including JAVA_OPTS to log garbage collector    
-	started=$SECONDS 
+	# execute ycsb program including JAVA_OPTS to log garbage collector
+	started=$SECONDS
 	JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc-run${RUN}-${phase}-${epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
     "$@" 2>&1 | tee "$output_csv" "$details_file" > /dev/null || rc=$?
 
@@ -641,7 +642,7 @@ initialize_database() {
     log "Done initializing $db_name."
 }
 
-# Function to write results as a csv 
+# Function to write results as a csv
 write_result() {
     local first="$1" field_name postgres_stats_csv base_header previous temp_result r
     local -a postgres_stats=("$cpu" "$memory")
@@ -845,9 +846,9 @@ original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=
 # Experiment parameters
 for epoch in $(seq 1 "$NUM_EPOCHS"); do
     for step in $(seq 1 "$STEPS_PER_EPOCH"); do
-        
+
         iteration=$((STEPS_PER_EPOCH*($epoch-1)+$step))
-        
+
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
         perl -i -p -e "s/^extendproportion=.*/extendproportion=$extendproportion_extend/" $WORKLOAD_FILE
@@ -891,7 +892,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         if [ -n "$extend_failed_count" ] && [ "$extend_failed_count" != "0" ]; then
             log "WARNING: $extend_failed_count EXTEND operations failed during extend phase"
         fi
-        
+
         collect_cpu_memory_metrics
         collect_postgres_metrics $DB_NAME
         write_result "FALSE"
@@ -913,7 +914,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             octet_length(coalesce(array_to_string(field9, ''), '')) AS size
             FROM usertable;" \
         >> "$KEY_SIZE_LOG"
-        
+
         # Verify extend operations: check min, max, avg sizes to detect extension failures
         extend_stats=$(awk -F, '
             NR == 1 { next }
@@ -1100,7 +1101,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         -p db.user="$DB_USERNAME" \
         -p db.passwd="$DB_PWD" \
         -p fieldlengthhistogram="$HISTOGRAM_FILE"
-        
+
         collect_cpu_memory_metrics
         collect_postgres_metrics $UNCHANGED_DB_NAME
         write_result "FALSE"
@@ -1124,11 +1125,11 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         done < "$KEYS_TO_DELETE_FILE" | pg_exec -d "$UNCHANGED_DB_NAME"
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
-    
+
         # if (( $((STEPS_PER_EPOCH*($epoch-1)+$step)) % 1 == 0 )); then
         if (( COMPARISON_INTERVAL > 0 && iteration % COMPARISON_INTERVAL == 0 )); then
             phase="clean-run"
-            
+
             log "Backing up the database started"
             RESTORE_LOG="${LOG_DIR}/restore_logs/${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_step${step}_restore.log"
             restore_comparison_database
@@ -1145,7 +1146,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
                 -p db.user="$DB_USERNAME" \
                 -p db.passwd="$DB_PWD" \
                 -p fieldlengthhistogram="$HISTOGRAM_FILE"
-                
+
 			collect_cpu_memory_metrics
             collect_postgres_metrics $BACKUP_DB_NAME
             rm -rf "$BACKUP_FILE"
@@ -1171,7 +1172,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
                 octet_length(coalesce(array_to_string(field9, ''), '')) AS size
                 FROM usertable;" \
             >> "$KEY_SIZE_LOG"
-            
+
             log "END size computation database=$BACKUP_DB_NAME"
 
             # Check if the output file exists, if not, create it with headers
@@ -1241,7 +1242,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             iteration=$((STEPS_PER_EPOCH*($epoch-1)+$step))
             total_size_avg_run=$(pg_exec -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(coalesce(array_to_string(field0, ''), '')) + octet_length(coalesce(array_to_string(field1, ''), '')) + octet_length(coalesce(array_to_string(field2, ''), '')) + octet_length(coalesce(array_to_string(field3, ''), '')) + octet_length(coalesce(array_to_string(field4, ''), '')) + octet_length(coalesce(array_to_string(field5, ''), '')) + octet_length(coalesce(array_to_string(field6, ''), '')) + octet_length(coalesce(array_to_string(field7, ''), '')) + octet_length(coalesce(array_to_string(field8, ''), '')) + octet_length(coalesce(array_to_string(field9, ''), ''))) FROM usertable;")
             log "Avg-run verification - Epoch:$epoch Step:$step Iteration:$iteration TotalSize:$total_size_avg_run ExpectedFieldLength:$fieldlengthaverage"
-            
+
             # Chainging the value size for comparison
             perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthoriginal/" $WORKLOAD_FILE
             source "$WORKLOAD_FILE"
