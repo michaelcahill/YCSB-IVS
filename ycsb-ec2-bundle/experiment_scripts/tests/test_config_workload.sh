@@ -99,48 +99,12 @@ EOF
 out="$(config::load_file "$TMP/eval.env" 2>&1)" && bad "command substitution must be rejected" || ok
 has "config is not executed" "$out" "substitution"
 
-# --- legacy launcher aliases --------------------------------------------------
+# --- legacy launcher aliases: gone (step 8c) ------------------------------------
 
-# env -i: a launcher's environment contains only the legacy names. Without isolation a
-# canonical name inherited from the caller (DB_PWD, for instance) would legitimately win
-# and the assertions below would depend on who runs the tests.
-check_alias() {
-    (
-        set -euo pipefail
-        env -i PATH="$PATH" HOME="$HOME" \
-            DIST=uniform WORK=pure UNCHANGE_DB_NAME=legacy_unch \
-            EXPERIMENT_EPOCHS=3 EXPERIMENT_RUNS_PER_EPOCH=4 \
-            DB_PASSWORD=s3cret FIELD_LENGTH_ORIGINAL=250 \
-            EXTEND_READPROPORTION=0.5 RUN_UPDATEPROPORTION=0.25 vacuum=1 \
-            bash -c '
-                set -euo pipefail
-                source "'"$SCRIPTS_DIR"'/lib/config.sh"
-                config::apply_legacy_aliases >/dev/null
-                [[ "$EXTEND_DIST" == uniform ]] &&
-                [[ "$WORKLOAD" == pure ]] &&
-                [[ "$UNCHANGED_DB_NAME" == legacy_unch ]] &&
-                [[ "$NUM_EPOCHS" == 3 ]] &&
-                [[ "$STEPS_PER_EPOCH" == 4 ]] &&
-                [[ "$DB_PWD" == s3cret ]] &&
-                [[ "$FIELDLENGTHORIGINAL" == 250 ]] &&
-                [[ "$READ_PROPORTION_EXTEND" == 0.5 ]] &&
-                [[ "$UPDATE_PROPORTION_POSTEXTEND" == 0.25 ]] &&
-                [[ "$VACUUM_ENABLED" == 1 ]]'
-    )
-}
-check_alias >/dev/null 2>&1 && ok || bad "legacy launcher variables were not translated (rc=$?)"
-
-check_alias_canonical_wins() {
-    (
-        set -euo pipefail
-        env -i PATH="$PATH" HOME="$HOME" DIST=uniform EXTEND_DIST=zipfian bash -c '
-            set -euo pipefail
-            source "'"$SCRIPTS_DIR"'/lib/config.sh"
-            config::apply_legacy_aliases 2>/dev/null
-            [[ "$EXTEND_DIST" == zipfian ]]'
-    )
-}
-check_alias_canonical_wins >/dev/null 2>&1 && ok || bad "the canonical name must win over the legacy one (rc=$?)"
+# The DIST/WORK/EXPERIMENT_EPOCHS-style variable shim and the deprecated backend-name
+# aliases existed to keep pre-refactor launchers working. The EC2 acceptance run used the
+# rewritten runbook, step 8c deleted the legacy scripts, and with them both shims: an old
+# name must now fail loudly instead of silently running something.
 
 # --- experiment mode ----------------------------------------------------------
 
@@ -282,31 +246,17 @@ workload::generate bogus-phase 1 >/dev/null 2>&1 && bad "unknown phase must fail
 # shellcheck source=lib/registry.sh
 source "$SCRIPTS_DIR/lib/registry.sh"
 
-# Old launcher names must keep resolving, must resolve to exactly one backend, and must not
-# enlarge the list of backends. `postgresql_array` is the TEXT[] schema (as it was before the
-# jsonb variant existed), which is why the jsonb aliases are listed separately.
-eq "alias postgresql_array" "$(registry::alias postgresql_array)" "postgresql_textarray"
-eq "alias postgresql" "$(registry::alias postgresql)" "postgresql_row"
-eq "alias array_json" "$(registry::alias array_json)" "postgresql_json"
-eq "alias jsonb" "$(registry::alias jsonb)" "postgresql_json"
-eq "alias innodb" "$(registry::alias innodb)" "mariadb_innodb"
-eq "unknown name passes through" "$(registry::alias nosuchbackend)" "nosuchbackend"
-for alias_name in postgresql_array jsonb innodb; do
-    if [[ " $(registry::available) " == *" $alias_name "* ]]; then
-        bad "alias '$alias_name' must not be advertised as a backend"
+# Deleted aliases must stay dead: none of the pre-refactor spellings may resolve, and
+# none of them is advertised as a backend.
+for old_name in postgresql postgresql_array postgresql_array-text-autovacuum textarray \
+                jsonb arrayjson array_json postgresql_array_json postgresql_jsonb \
+                innodb rocksdb; do
+    if registry::resolve "$old_name" >/dev/null 2>&1; then
+        bad "removed alias $old_name still resolves"
+    elif [[ " $(registry::available) " == *" $old_name "* ]]; then
+        bad "$old_name must not be advertised as a backend"
     else
-        ok
-    fi
-done
-# An alias may only point at a backend that exists, and it has to resolve to exactly the file
-# the real name would. (This is what catches an alias left behind when its backend is renamed.)
-for alias_name in postgresql postgresql_array jsonb innodb rocksdb; do
-    resolved="$(registry::resolve "$alias_name" 2>/dev/null)"
-    target="$(registry::alias "$alias_name")"
-    if [[ "$resolved" == "$BACKENDS_DIR/$target.sh" && -f "$resolved" ]]; then
-        ok
-    else
-        bad "alias $alias_name should resolve to $target.sh, got '$resolved'"
+        ok "$old_name is gone"
     fi
 done
 registry::resolve _postgresql_common >/dev/null 2>&1 && bad "shared modules are not backends" || ok

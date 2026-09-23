@@ -56,13 +56,14 @@ for b in "${tree_backends[@]}"; do
     fi
 done
 
-# Deprecated aliases resolve inside the bundle too (the registry override still calls
-# registry::alias), and unknown names are rejected.
-if diff <(./experiment.sh postgresql_array --dry-run 2>&1) \
-        <("$BUNDLE" postgresql_array --dry-run 2>&1) >/dev/null; then
-    ok "deprecated alias works through the bundle"
+# Aliases died with the legacy scripts (step 8c): a removed name must fail in the tree and
+# in the bundle alike. (Their stderr may not be byte-identical - one lists available,
+# the other bundled backends - so both rejections are asserted, not their text.)
+if ./experiment.sh postgresql_array --dry-run >/dev/null 2>&1 ||
+        "$BUNDLE" postgresql_array --dry-run >/dev/null 2>&1; then
+    bad "removed alias still resolves (tree or bundle)"
 else
-    bad "deprecated alias differs in bundle"
+    ok "removed alias rejected by tree and bundle"
 fi
 if "$BUNDLE" definitely_not_a_backend >/dev/null 2>&1; then
     bad "bundle accepted an unknown backend"

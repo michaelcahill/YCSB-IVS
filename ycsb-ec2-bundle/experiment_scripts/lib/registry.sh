@@ -29,30 +29,13 @@ registry::available() {
     done | sort
 }
 
-# Old launchers (and the old per-script names) call a backend by a name that no longer
-# exists. Translating here, once, is what keeps `./experiment.sh postgresql_array` and
-# `./experiment.sh jsonb` working without any other code knowing the old spelling. Note that
-# `postgresql_array` means the TEXT[] schema, as it did before the jsonb variant existed.
-# Removed together with the legacy scripts (REFACTOR_PLAN.md step 8c).
-registry::alias() {
-    case "${1:-}" in
-        postgresql) printf 'postgresql_row\n' ;;
-        postgresql_array|postgresql_array-text-autovacuum|textarray) printf 'postgresql_textarray\n' ;;
-        jsonb|arrayjson|array_json|postgresql_array_json|postgresql_jsonb) printf 'postgresql_json\n' ;;
-        innodb) printf 'mariadb_innodb\n' ;;
-        rocksdb) printf 'mariadb_rocksdb\n' ;;
-        *) printf '%s\n' "$1" ;;
-    esac
-}
-
 # registry::resolve NAME -> path, or non-zero and a helpful message.
+# Names are exact since step 8c deleted the legacy scripts: the pre-refactor spellings
+# (postgresql_array, jsonb, innodb, ...) resolved through a temporary alias for the
+# duration of the migration and are gone together with the launchers they served.
 registry::resolve() {
     local name file
-    name="$(registry::alias "${1:-}")"
-    if [[ "$name" != "${1:-}" ]]; then
-        # stdout carries the resolved path, so the notice must not go there.
-        echo "[registry] deprecated backend name '${1:-}' used as '$name' (update the launcher)" >&2
-    fi
+    name="${1:-}"
     [[ -n "$name" && "$name" != _* ]] || {
         echo "[error] unknown backend: ${name:-<none>} (names starting with '_' are shared code, not backends)" >&2
         registry::available | sed 's/^/  /' >&2

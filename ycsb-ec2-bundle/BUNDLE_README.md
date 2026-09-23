@@ -70,9 +70,6 @@ mkdir -p analysis/Data/Baseline_data analysis/Data/Value_size_data analysis/Data
    ./experiment.sh postgresql_row
    ```
 
-   (The one `experiment_<backend>.sh` per backend is a compatibility shim for this single
-   runner; it disappears with REFACTOR_PLAN.md step 8c.)
-
    The runner `cd`s into its own directory at startup, so it also works when invoked with
    a full path from anywhere. Every backend — including the PostgreNoSQL document store
    (`./experiment.sh postgrenosql`, schema `YCSB_KEY` + `YCSB_VALUE JSONB`) — is selected

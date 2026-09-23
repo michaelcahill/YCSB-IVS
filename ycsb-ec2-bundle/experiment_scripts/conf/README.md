@@ -35,17 +35,12 @@ quote the value.
 
 `--dry-run` prints the active configuration and the files that were applied.
 
-## Legacy launcher variables
+## Only canonical names
 
-Launchers written against the old scripts keep working through the alias shim in
-`lib/config.sh`: `DIST→EXTEND_DIST`, `WORK→WORKLOAD`,
-`UNCHANGE_DB_NAME→UNCHANGED_DB_NAME`, `EXPERIMENT_EPOCHS→NUM_EPOCHS`,
-`EXPERIMENT_RUNS_PER_EPOCH→STEPS_PER_EPOCH`, `DB_PASSWORD→DB_PWD`,
-`FIELD_LENGTH_ORIGINAL→FIELDLENGTHORIGINAL`, `vacuum→VACUUM_ENABLED` and the
-`EXTEND_*`/`RUN_*` proportion and distribution names. Each translation prints a
-deprecation line; when both names are set the canonical one wins. The shim is scheduled
-for removal one release after the runbook is updated (REFACTOR_PLAN.md step 7).
-
-Instrumentation variables (`REQUIRE_FULL_VISIBILITY`, `SAMPLE_INTERVAL_SECONDS`,
-`SPIKE_TRIGGER_*`, …) belong to the full-visibility module of step 8b and are reported as
-unsupported rather than silently ignored.
+The names in this directory's files are the canonical configuration names — exactly the
+ones `--dry-run` prints. The pre-refactor launcher aliases (`DIST`, `WORK`,
+`UNCHANGE_DB_NAME`, `EXPERIMENT_EPOCHS`, `DB_PASSWORD`, the `EXTEND_*`/`RUN_*`
+proportion pairs, …) and the full-visibility instrumentation variables
+(`REQUIRE_FULL_VISIBILITY`, `SAMPLE_INTERVAL_SECONDS`, `SPIKE_TRIGGER_*`, …) were removed
+with refactor step 8c: nothing translates or warns about them any more, so a stale
+variable simply has no effect. Old launchers live in the `pre-refactor-scripts` tag.

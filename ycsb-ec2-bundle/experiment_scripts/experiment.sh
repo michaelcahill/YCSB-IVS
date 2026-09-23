@@ -55,7 +55,8 @@ Usage: ./experiment.sh <backend> [options]
 Backends:
 $(registry::available | sed 's/^/  /')
 
-Old names still resolve (postgresql_array, jsonb, innodb, ...) and print a deprecation line.
+Backend names are exactly the files in lib/backends/ (see --list-backends); pre-refactor
+spellings (postgresql_array, jsonb, innodb, ...) were removed with the legacy scripts.
 
 Options:
   --config FILE       load KEY=VALUE configuration from FILE before running
@@ -145,11 +146,6 @@ if (( ${#CONFIG_FILES[@]} )); then
         config::load_file "$file"
     done
 fi
-
-# Old launcher variable names (DIST, WORK, EXPERIMENT_EPOCHS, …) are translated after
-# the files, so a preset can never shadow what a launcher exported.
-config::apply_legacy_aliases
-config::warn_discarded_legacy
 
 if (( ${#VAR_OVERRIDES[@]} )); then
     for assignment in "${VAR_OVERRIDES[@]}"; do

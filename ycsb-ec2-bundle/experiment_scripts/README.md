@@ -9,8 +9,8 @@ cd /path/to/ycsb-ec2-bundle/experiment_scripts
 
 `lib/backends/<backend>.sh` supplies connection/schema behaviour, `lib/lifecycle.sh`
 supplies the phase steps every backend shares, and `conf/` supplies parameters. There is
-no per-database experiment script any more (the old `experiment_*.sh` names are one-line
-shims until step 8c; see §Legacy).
+no per-database experiment script any more — the pre-refactor `experiment_*.sh` entrypoints
+were deleted with refactor step 8c (recoverable from the `pre-refactor-scripts` tag).
 
 ## Quick Start
 
@@ -40,10 +40,10 @@ smoke.
 | `neo4j` | Neo4j (property graph) | `neo4j` | Community = one user database per instance, so three endpoints |
 | `couchbase` | Couchbase (document store, SDK 2.x) | `couchbase2` | one bucket + same-named user per database role |
 
-Old names still resolve and print a deprecation line: `postgresql_array` →
-`postgresql_textarray`, `jsonb`/`array_json` → `postgresql_json`, `postgresql` →
-`postgresql_row`, `innodb`/`rocksdb` → the MariaDB pair. PostgreSQL backends require
-PostgreSQL ≥ 18 (`pg_stat_checkpointer`).
+Backend names are exactly the table above — the pre-refactor spellings
+(`postgresql_array`, `jsonb`, `innodb`, …) were aliases for the deleted legacy launchers
+and no longer resolve. PostgreSQL backends require PostgreSQL ≥ 18
+(`pg_stat_checkpointer`).
 
 ## Host Requirements
 
@@ -267,19 +267,16 @@ DB_PWD=*** bash tests/smoke_backend.sh postgresql_row baseline
 through the generated bundle, and one structural smoke per backend whose `--check`
 passes.
 
-## Legacy (until step 8c)
+## Historical Scripts (deleted at refactor step 8c)
 
-- The old entrypoints (`experiment_postgresql_array-text-autovacuum.sh`,
-  `experiment_mongodb.sh`, …) are one-line shims into `experiment.sh` and will be deleted
-  at refactor step 8c. Use the runner directly in new scripts.
-- **Frozen full-visibility profile.** `run_postgresql_array_json_full_visibility.sh` +
-  `experiment_postgresql_array_json.sh` + `benchmark_observability.py` remain runnable,
-  unchanged, as the provenance of existing full-visibility evidence (WAL /
-  `pg_stat_statements` / buffer-residency / prewarm capture). That instrumentation is
-  **discarded, not ported** — `experiment.sh` has no code path for it and warns when
-  `SPIKE_TRIGGER_*`-style variables are set; the jsonb schema itself is
-  `./experiment.sh postgresql_json`. Do not extend or adapt these scripts; reproduce an
-  old run from the `pre-refactor-scripts` tag instead
-  (`git worktree add ../pre-refactor pre-refactor-scripts`). The full historical
-  full-visibility runbook lives in this file's git history. They are deleted at step 8c,
-  after EC2 confirmation — see `REFACTOR_PLAN.md` §4 and §8.
+The pre-refactor world — per-database `experiment_*.sh` runners, the `*_baseline.sh`
+family, `experiment_sample.sh`, and the array_json full-visibility stack
+(`run_postgresql_array_json_full_visibility.sh`, `experiment_postgresql_array_json.sh`,
+`benchmark_observability.py`) — is gone from the tree after an EC2 acceptance run of this
+runbook. Its instrumentation (WAL / `pg_stat_statements` / buffer-residency / prewarm
+capture) was discarded by design, not ported (`REFACTOR_PLAN.md` §4); the jsonb schema it
+benchmarked is `./experiment.sh postgresql_json`.
+
+An old run can still be reproduced from the annotated tag `pre-refactor-scripts`
+(`git worktree add ../pre-refactor pre-refactor-scripts`); existing full-visibility
+evidence keeps that provenance. Do not resurrect or adapt the scripts in this tree.

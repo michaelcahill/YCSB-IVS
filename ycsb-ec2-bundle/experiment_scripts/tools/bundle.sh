@@ -186,11 +186,7 @@ registry::available() {
 
 registry::resolve() {
     local name b
-    name="$(registry::alias "${1:-}")"
-    if [[ -n "$name" && "$name" != "${1:-}" ]]; then
-        # stdout carries the resolved target, so the notice must not go there.
-        echo "[registry] deprecated backend name '${1:-}' used as '$name' (update the launcher)" >&2
-    fi
+    name="${1:-}"
     for b in "${BUNDLE_BACKENDS[@]}"; do
         if [[ "$b" == "$name" ]]; then
             printf '%s\n' "$BACKENDS_DIR/$name.sh"

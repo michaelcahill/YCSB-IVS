@@ -18,7 +18,10 @@ TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 GOLDEN_DIR="$TESTS_DIR/golden/smoke"
 
-TARGET_SCRIPT="${TARGET_SCRIPT:-$SCRIPTS_DIR/experiment_postgresql_array-text-autovacuum.sh}"
+# The authoritative configuration is the runner plus its PostgreSQL text-array backend;
+# before step 8c this smoke ran through the legacy-name shim of the very same invocation.
+TARGET_SCRIPT="${TARGET_SCRIPT:-$SCRIPTS_DIR/experiment.sh}"
+TARGET_ARGS="${TARGET_ARGS:-postgresql_textarray}"
 
 UPDATE_GOLDEN=0
 [[ "${1:-}" != "--update" ]] || UPDATE_GOLDEN=1
@@ -97,7 +100,7 @@ WORKLOAD_UNTRACKED_BEFORE="$(git -C "$SCRIPTS_DIR" ls-files --others --exclude-s
 echo "[smoke] workdir=$WORKDIR"
 
 set +e
-bash -c "${TARGET_CMD:-bash "$TARGET_SCRIPT"}" > "$WORKDIR/run.out" 2>&1
+bash -c "${TARGET_CMD:-bash "$TARGET_SCRIPT" $TARGET_ARGS}" > "$WORKDIR/run.out" 2>&1
 rc=$?
 set -e
 sed 's/^/[run] /' "$WORKDIR/run.out" | tail -20
