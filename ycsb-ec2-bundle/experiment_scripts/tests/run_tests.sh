@@ -20,6 +20,14 @@ step() { printf '\n=== %s ===\n' "$*"; }
 step "static checks"
 bash tools/check_scripts.sh
 
+step "shell unit tests (config, workload generation)"
+if bash tests/test_config_workload.sh; then
+    :
+else
+    echo "[tests] shell unit tests FAILED"
+    exit 1
+fi
+
 step "python unit tests"
 if python3 -m unittest discover -s tests -t tests -v 2>&1 | tail -25; then
     :

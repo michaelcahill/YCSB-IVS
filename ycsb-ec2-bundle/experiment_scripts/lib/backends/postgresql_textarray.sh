@@ -164,8 +164,10 @@ postgres_preflight() {
             return 1
         }
     done
-    if [[ ! -x "$YCSB" || ! -r "$WORKLOAD_FILE" || ! -w "$WORKLOAD_FILE" || ! -r "$JDBC_PROPERTIES" ]]; then
-        echo "[ERROR] YCSB launcher/config is missing, or workload is not readable/writable." >&2
+    # Workload files are input only: readable, never writable. The per-phase copies the
+    # run needs are generated into $WORKLOAD_DIR (checked by workload::init).
+    if [[ ! -x "$YCSB" || ! -r "$WORKLOAD_FILE" || ! -r "$JDBC_PROPERTIES" ]]; then
+        echo "[ERROR] YCSB launcher/config is missing, or the workload template is not readable: $WORKLOAD_FILE" >&2
         return 1
     fi
     for pattern in "$YCSB_HOME/core/target/*.jar" \

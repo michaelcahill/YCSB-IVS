@@ -16,7 +16,7 @@
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] Done initializing ycsb_smoke_unch.
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke
 [<TIMESTAMP>] [epoch=0 run=0 phase=load] START YCSB load
-[<TIMESTAMP>] Command line: -load -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/workload-smoke -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthdistribution=constant -p fieldlength=100
+[<TIMESTAMP>] Command line: -load -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/experiment/workloads/load-iter00.workload -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthdistribution=constant -p fieldlength=100
 [<TIMESTAMP>] YCSB Client 0.18.0-SNAPSHOT
 [<TIMESTAMP>] 
 [<TIMESTAMP>] Loading workload...
@@ -32,7 +32,7 @@
 [<TIMESTAMP>] [epoch=0 run=0 phase=load] END statistics snapshot database=ycsb_smoke statistics=<N> relsizes=<N>
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke_unch
 [<TIMESTAMP>] [epoch=0 run=0 phase=reference-load] START YCSB reference-load
-[<TIMESTAMP>] Command line: -load -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/workload-smoke -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke_unch -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthdistribution=constant -p fieldlength=100
+[<TIMESTAMP>] Command line: -load -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/experiment/workloads/reference-load-iter00.workload -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke_unch -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthdistribution=constant -p fieldlength=100
 [<TIMESTAMP>] YCSB Client 0.18.0-SNAPSHOT
 [<TIMESTAMP>] 
 [<TIMESTAMP>] Loading workload...
@@ -41,7 +41,7 @@
 [<TIMESTAMP>] Finished ycsb_smoke_unch phase=reference-load epoch=0 (exit=0)
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke
 [<TIMESTAMP>] [epoch=1 run=1 phase=extend] START YCSB extend
-[<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/workload-smoke -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthdistribution=constant -p fieldlength=100
+[<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/experiment/workloads/extend-iter01.workload -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthdistribution=constant -p fieldlength=100
 [<TIMESTAMP>] YCSB Client 0.18.0-SNAPSHOT
 [<TIMESTAMP>] 
 [<TIMESTAMP>] Loading workload...
@@ -57,7 +57,7 @@
 [<TIMESTAMP>] [epoch=1 run=1 phase=extend] END statistics snapshot database=ycsb_smoke statistics=<N> relsizes=<N>
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke
 [<TIMESTAMP>] [epoch=1 run=1 phase=run] START YCSB run
-[<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/workload-smoke -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthhistogram=<WORKDIR>/experiment/logs/histogram.txt
+[<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/experiment/workloads/run-iter01.workload -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthhistogram=<WORKDIR>/experiment/logs/histogram.txt
 [<TIMESTAMP>] YCSB Client 0.18.0-SNAPSHOT
 [<TIMESTAMP>] 
 [<TIMESTAMP>] Loading workload...
@@ -75,7 +75,7 @@
 [<TIMESTAMP>] [epoch=1 run=1 phase=run] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke_unch
 [<TIMESTAMP>] [epoch=1 run=1 phase=reference] START YCSB reference
-[<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/workload-smoke -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke_unch -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthhistogram=<WORKDIR>/experiment/logs/histogram.txt
+[<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/experiment/workloads/reference-iter01.workload -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke_unch -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthhistogram=<WORKDIR>/experiment/logs/histogram.txt
 [<TIMESTAMP>] YCSB Client 0.18.0-SNAPSHOT
 [<TIMESTAMP>] 
 [<TIMESTAMP>] Loading workload...
@@ -96,7 +96,7 @@
 [<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke_bak
 [<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] START YCSB clean-run
-[<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/workload-smoke -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke_bak -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthhistogram=<WORKDIR>/experiment/logs/histogram.txt
+[<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/experiment/workloads/clean-run-iter01.workload -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke_bak -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthhistogram=<WORKDIR>/experiment/logs/histogram.txt
 [<TIMESTAMP>] YCSB Client 0.18.0-SNAPSHOT
 [<TIMESTAMP>] 
 [<TIMESTAMP>] Loading workload...
@@ -116,7 +116,7 @@
 [<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke_bak
 [<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] START YCSB avg-run
-[<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/workload-smoke -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke_bak -p db.user=ycsb -p db.passwd=<REDACTED>
+[<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/experiment/workloads/avg-run-iter01.workload -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke_bak -p db.user=ycsb -p db.passwd=<REDACTED>
 [<TIMESTAMP>] YCSB Client 0.18.0-SNAPSHOT
 [<TIMESTAMP>] 
 [<TIMESTAMP>] Loading workload...

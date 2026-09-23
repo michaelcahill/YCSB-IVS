@@ -5,7 +5,9 @@
 #
 # This is backend-independent apart from calls through the backend contract and the
 # legacy aliases that still wrap it (removed in step 5). It reads its configuration
-# from the globals prepared by lib/config.sh and writes artefacts under $EXPERIMENT_DIR.
+# from the globals prepared by lib/config.sh, never writes to a workload file: every
+# YCSB invocation gets an immutable generated file from lib/workload.sh, and writes its
+# artefacts under $EXPERIMENT_DIR.
 
 run_ycsb() {
     local label="$1" started=$SECONDS rc=0
@@ -110,6 +112,7 @@ run_experiment() {
 start_logging
 log "START preflight"
 postgres_preflight true "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"
+workload::init
 log "END preflight"
 mkdir -p "$(dirname "$OUTPUT_FILE")" "$(dirname "$KEY_SIZE_FILE_AFTER_EXTEND")"
 
@@ -129,22 +132,16 @@ phase="load"
 epoch=0
 step=0
 iteration=0
-# Extract workload parameters for load phase
-source "$WORKLOAD_FILE"
-recordcount=${recordcount:-""}
-readallfields=${readallfields:-""}
-requestdistribution=${requestdistribution:-""}
-readrequestdistribution=${readrequestdistribution:-""}
-updaterequestdistribution=${updaterequestdistribution:-""}
-readproportion=${readproportion:-""}
-updateproportion=${updateproportion:-""}
-scanproportion=${scanproportion:-""}
-insertproportion=${insertproportion:-""}
-extendproportion=${extendproportion:-""}
+
+# Values later phases need from the template, before any overlay is applied.
+original_operationcount="${operationcount_override:-$(workload::get_value "$WORKLOAD_FILE" operationcount)}"
+
+WORKLOAD_PHASE="$(workload::generate load 0)"
+workload::apply_context "$WORKLOAD_PHASE"
 
 run_with_metrics "$DB_NAME" "$phase" "$step" "$OUTPUT_CSV" \
 	"$YCSB" load "$YCSB_BINDING" -s \
-    -P "$WORKLOAD_FILE" \
+    -P "$WORKLOAD_PHASE" \
     -P "$JDBC_PROPERTIES" \
     -p db.url="$DB_URL" \
     -p db.user="$DB_USERNAME" \
@@ -159,9 +156,11 @@ write_result "TRUE"
 
 # Load unchange value size (reference) DB
 phase="reference-load"
+WORKLOAD_PHASE="$(workload::generate reference-load 0)"
+workload::apply_context "$WORKLOAD_PHASE"
 run_with_metrics "$UNCHANGED_DB_NAME" "$phase" "$step" "$OUTPUT_CSV" \
 	"$YCSB" load "$YCSB_BINDING" -s \
-    -P "$WORKLOAD_FILE" -P "$JDBC_PROPERTIES" \
+    -P "$WORKLOAD_PHASE" -P "$JDBC_PROPERTIES" \
     -p db.url="$UNCHANGED_DB_URL" \
     -p db.user="$DB_USERNAME" \
     -p db.passwd="$DB_PWD" \
@@ -170,47 +169,25 @@ run_with_metrics "$UNCHANGED_DB_NAME" "$phase" "$step" "$OUTPUT_CSV" \
 total_size_reference_load=$(pg_exec -d "$UNCHANGED_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(coalesce(array_to_string(field0, ''), '')) + octet_length(coalesce(array_to_string(field1, ''), '')) + octet_length(coalesce(array_to_string(field2, ''), '')) + octet_length(coalesce(array_to_string(field3, ''), '')) + octet_length(coalesce(array_to_string(field4, ''), '')) + octet_length(coalesce(array_to_string(field5, ''), '')) + octet_length(coalesce(array_to_string(field6, ''), '')) + octet_length(coalesce(array_to_string(field7, ''), '')) + octet_length(coalesce(array_to_string(field8, ''), '')) + octet_length(coalesce(array_to_string(field9, ''), ''))) FROM usertable;")
 log "Reference-load verification - TotalSize:$total_size_reference_load ExpectedFieldLength:$fieldlengthoriginal"
 
-# Save original operationcount before modifying it
-original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
-
 # Experiment parameters
 for epoch in $(seq 1 "$NUM_EPOCHS"); do
     for step in $(seq 1 "$STEPS_PER_EPOCH"); do
         
         iteration=$((STEPS_PER_EPOCH*($epoch-1)+$step))
         
-        # Setting parameter values for extend phase
-        log "=== Setting parameter values for extend phase ==="
-        perl -i -p -e "s/^extendproportion=.*/extendproportion=$extendproportion_extend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^readproportion=.*/readproportion=$readproportion_extend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^updateproportion=.*/updateproportion=$updateproportion_extend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^scanproportion=.*/scanproportion=$scanproportion_extend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^insertproportion=.*/insertproportion=$insertproportion_extend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^readmodifywriteproportion=.*/readmodifywriteproportion=$readmodifywriteproportion_extend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_extend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^readrequestdistribution=.*/readrequestdistribution=$readrequestdistribution_extend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^updaterequestdistribution=.*/updaterequestdistribution=$updaterequestdistribution_extend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^operationcount=.*/operationcount=$extendoperationcount/" $WORKLOAD_FILE
-        source "$WORKLOAD_FILE"
-        # Extract workload parameters after sourcing
-        recordcount=${recordcount:-""}
-        readallfields=${readallfields:-""}
-        requestdistribution=${requestdistribution:-""}
-        readrequestdistribution=${readrequestdistribution:-""}
-        updaterequestdistribution=${updaterequestdistribution:-""}
-        readproportion=${readproportion:-""}
-        updateproportion=${updateproportion:-""}
-        scanproportion=${scanproportion:-""}
-        insertproportion=${insertproportion:-""}
-        extendproportion=${extendproportion:-""}
+        # Extend phase settings go into a generated workload file, never back into
+        # the template.
+        log "=== Generating the extend workload ==="
+        phase="extend"
+        WORKLOAD_PHASE="$(workload::generate extend "$iteration")"
+        workload::apply_context "$WORKLOAD_PHASE"
 
         # Execute the extend phase
         log "=== Executing the extend phase with extendproportion=1 and other proportions=0 ==="
-        phase="extend"
         # Capture both stdout and stderr to capture status messages
         run_with_metrics "$DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
             "$YCSB" run "$YCSB_BINDING" -s \
-            -P "$WORKLOAD_FILE" -P "$JDBC_PROPERTIES" \
+            -P "$WORKLOAD_PHASE" -P "$JDBC_PROPERTIES" \
             -p db.url="$DB_URL" \
             -p db.user="$DB_USERNAME" \
             -p db.passwd="$DB_PWD" \
@@ -323,32 +300,9 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         fi
 
         phase="run-setup"
-        # Setting parameter values for run phase
-        log "=== Setting parameter values for run phase ==="
-        perl -i -p -e "s/^extendproportion=.*/extendproportion=$extendproportion_postextend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^readproportion=.*/readproportion=$readproportion_postextend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^updateproportion=.*/updateproportion=$updateproportion_postextend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^scanproportion=.*/scanproportion=$scanproportion_postextend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^insertproportion=.*/insertproportion=$insertproportion_postextend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^readmodifywriteproportion=.*/readmodifywriteproportion=$readmodifywriteproportion_postextend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^requestdistribution=.*/requestdistribution=$requestdistribution_postextend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^readrequestdistribution=.*/readrequestdistribution=$readrequestdistribution_postextend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^updaterequestdistribution=.*/updaterequestdistribution=$updaterequestdistribution_postextend/" $WORKLOAD_FILE
-        perl -i -p -e "s/^operationcount=.*/operationcount=$original_operationcount/" $WORKLOAD_FILE
-        grep -q '^fieldlengthdistribution=' "$WORKLOAD_FILE" || echo -e "\nfieldlengthdistribution=histogram" >> "$WORKLOAD_FILE"
-        source "$WORKLOAD_FILE"
-
-        # Extract workload parameters after sourcing
-        recordcount=${recordcount:-""}
-        readallfields=${readallfields:-""}
-        requestdistribution=${requestdistribution:-""}
-        readrequestdistribution=${readrequestdistribution:-""}
-        updaterequestdistribution=${updaterequestdistribution:-""}
-        readproportion=${readproportion:-""}
-        updateproportion=${updateproportion:-""}
-        scanproportion=${scanproportion:-""}
-        insertproportion=${insertproportion:-""}
-        extendproportion=${extendproportion:-""}
+        log "=== Generating the measured workload ==="
+        WORKLOAD_PHASE="$(workload::generate run "$iteration")"
+        workload::apply_context "$WORKLOAD_PHASE"
 
         # Save the existing keys in the database
         pg_exec -d "$DB_NAME" -At -F"," \
@@ -382,7 +336,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         phase="run"
         run_with_metrics "$DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
         "$YCSB" run "$YCSB_BINDING" -s \
-        -P "$WORKLOAD_FILE" \
+        -P "$WORKLOAD_PHASE" \
         -P "$JDBC_PROPERTIES" \
         -p db.url="$DB_URL" \
         -p db.user="$DB_USERNAME" \
@@ -422,9 +376,11 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
 
         # Reference workload with unchanging value sizes
         phase="reference"
+        WORKLOAD_PHASE="$(workload::generate reference "$iteration")"
+        workload::apply_context "$WORKLOAD_PHASE"
         run_with_metrics "$UNCHANGED_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
         "$YCSB" run "$YCSB_BINDING" -s \
-        -P "$WORKLOAD_FILE" \
+        -P "$WORKLOAD_PHASE" \
         -P "$JDBC_PROPERTIES" \
         -p db.url="$UNCHANGED_DB_URL" \
         -p db.user="$DB_USERNAME" \
@@ -467,9 +423,11 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
 			# wait for all backend processes to finish before doing clean run (max 20 mins)
 			wait_for_idle_postgres "$DB_NAME" 20 1200
 
+			WORKLOAD_PHASE="$(workload::generate clean-run "$iteration")"
+                workload::apply_context "$WORKLOAD_PHASE"
 			run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
                 "$YCSB" run "$YCSB_BINDING" -s \
-                -P "$WORKLOAD_FILE" \
+                -P "$WORKLOAD_PHASE" \
                 -P "$JDBC_PROPERTIES" \
                 -p db.url="$BACKUP_URL" \
                 -p db.user="$DB_USERNAME" \
@@ -480,9 +438,6 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             collect_postgres_metrics $BACKUP_DB_NAME
             rm -rf "$BACKUP_FILE"
             write_result "FALSE"
-
-            # Revert and remove fieldlengthdistribution variable from workload file
-            awk '!/^fieldlengthdistribution=/' "$WORKLOAD_FILE" | awk 'NF || NR == 1' > tmp && mv tmp "$WORKLOAD_FILE"
 
             # Key Sizes
             log "Size computation started"
@@ -519,7 +474,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             fi
 
             # Extract the recordcount from the workload file
-            recordcount=$(grep -E '^recordcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+            recordcount="$(workload::get_value "$WORKLOAD_PHASE" recordcount)"
 
             # PostgreSQL query to get the total size of all records
             total_size=$(pg_exec -d "$BACKUP_DB_NAME" -At -F"," \
@@ -546,15 +501,9 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
 
             log "Total size: $total_size, Field length average: $fieldlengthaverage"
 
-            # Changing the value size for comparison
-            if grep -q '^fieldlength=' "$WORKLOAD_FILE"; then
-                perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthaverage/" $WORKLOAD_FILE
-            else
-                echo "fieldlength=$fieldlengthaverage" >> "$WORKLOAD_FILE"
-            fi
-            source "$WORKLOAD_FILE"
-            # Verify fieldlength was set correctly
-            actual_fieldlength=$(grep -E '^fieldlength=' "$WORKLOAD_FILE" | cut -d'=' -f2)
+            # The comparison database is reloaded at the measured average value size.
+            WORKLOAD_PHASE="$(workload::generate comparison-load "$iteration")"
+            actual_fieldlength="$(workload::get_value "$WORKLOAD_PHASE" fieldlength)"
             log "Workload file fieldlength set to: $actual_fieldlength (expected: $fieldlengthaverage)"
 
             pg_exec -d "$BACKUP_DB_NAME" \
@@ -563,7 +512,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             # Resetting the database with new data load
             phase="comparison-load"
             log "=== Executing the load phase for the comparison study ==="
-            run_ycsb "comparison-load" load "$YCSB_BINDING" -s -P "$WORKLOAD_FILE" -P "$JDBC_PROPERTIES" -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD"
+            run_ycsb "comparison-load" load "$YCSB_BINDING" -s -P "$WORKLOAD_PHASE" -P "$JDBC_PROPERTIES" -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD"
             total_size_comparison_load=$(pg_exec -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(coalesce(array_to_string(field0, ''), '')) + octet_length(coalesce(array_to_string(field1, ''), '')) + octet_length(coalesce(array_to_string(field2, ''), '')) + octet_length(coalesce(array_to_string(field3, ''), '')) + octet_length(coalesce(array_to_string(field4, ''), '')) + octet_length(coalesce(array_to_string(field5, ''), '')) + octet_length(coalesce(array_to_string(field6, ''), '')) + octet_length(coalesce(array_to_string(field7, ''), '')) + octet_length(coalesce(array_to_string(field8, ''), '')) + octet_length(coalesce(array_to_string(field9, ''), ''))) FROM usertable;")
             log "Comparison-load verification - Epoch:$epoch Step:$step TotalSize:$total_size_comparison_load ExpectedFieldLength:$fieldlengthaverage"
 
@@ -572,9 +521,9 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             total_size_avg_run=$(pg_exec -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(coalesce(array_to_string(field0, ''), '')) + octet_length(coalesce(array_to_string(field1, ''), '')) + octet_length(coalesce(array_to_string(field2, ''), '')) + octet_length(coalesce(array_to_string(field3, ''), '')) + octet_length(coalesce(array_to_string(field4, ''), '')) + octet_length(coalesce(array_to_string(field5, ''), '')) + octet_length(coalesce(array_to_string(field6, ''), '')) + octet_length(coalesce(array_to_string(field7, ''), '')) + octet_length(coalesce(array_to_string(field8, ''), '')) + octet_length(coalesce(array_to_string(field9, ''), ''))) FROM usertable;")
             log "Avg-run verification - Epoch:$epoch Step:$step Iteration:$iteration TotalSize:$total_size_avg_run ExpectedFieldLength:$fieldlengthaverage"
             
-            # Chainging the value size for comparison
-            perl -i -p -e "s/^fieldlength=.*/fieldlength=$fieldlengthoriginal/" $WORKLOAD_FILE
-            source "$WORKLOAD_FILE"
+            # The avg-run compares at the original value size again.
+            WORKLOAD_PHASE="$(workload::generate avg-run "$iteration")"
+            workload::apply_context "$WORKLOAD_PHASE"
 
 			# wait for all backend processes to finish before doing clean run (max 20 mins)
 			wait_for_idle_postgres "$DB_NAME" 20 1200
@@ -584,7 +533,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             phase="avg-run"
             run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
                 "$YCSB" run "$YCSB_BINDING" -s \
-                -P "$WORKLOAD_FILE" \
+                -P "$WORKLOAD_PHASE" \
                 -P "$JDBC_PROPERTIES" \
                 -p db.url="$BACKUP_URL" \
                 -p db.user="$DB_USERNAME" \

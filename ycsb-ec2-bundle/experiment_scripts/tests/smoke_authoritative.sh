@@ -99,6 +99,40 @@ set -e
 sed 's/^/[run] /' "$WORKDIR/run.out" | tail -20
 echo "[smoke] experiment exit status=$rc"
 
+# --- workload files are input only -------------------------------------------
+# The legacy scripts rewrote ../workloads in place 22 times per run; the generated-file
+# design must leave the tracked templates byte-identical and put every phase workload
+# inside the experiment directory.
+echo "[smoke] checking that tracked workloads were not modified"
+if git -C "$SCRIPTS_DIR" diff --quiet -- ../workloads \
+   && [[ -z "$(git -C "$SCRIPTS_DIR" ls-files --others --exclude-standard -- ../workloads)" ]]; then
+    echo "[smoke] ../workloads untouched"
+else
+    echo "[smoke] FAILED: the run modified tracked files under ../workloads" >&2
+    git -C "$SCRIPTS_DIR" status --porcelain -- ../workloads >&2
+    exit 1
+fi
+
+gen_count=0
+for expected in load reference-load extend run reference clean-run comparison-load avg-run; do
+    f="$EXPERIMENT_DIR/workloads/${expected}-iter0?.workload"
+    if ! compgen -G "$f" >/dev/null; then
+        echo "[smoke] FAILED: no generated workload for phase $expected under $EXPERIMENT_DIR/workloads" >&2
+        exit 1
+    fi
+    gen_count=$((gen_count + 1))
+done
+# Every generated file must record where it came from.
+for f in "$EXPERIMENT_DIR"/workloads/*.workload; do
+    grep -q "^# template=$WORKLOAD sha256=" "$f" || {
+        echo "[smoke] FAILED: $f has no provenance header" >&2; exit 1; }
+done
+echo "[smoke] generated workloads: $gen_count phase(s) under $EXPERIMENT_DIR/workloads"
+if [[ -n "$(find "$EXPERIMENT_DIR/workloads" -name '*.tmp.*' -o -name '*~')" ]]; then
+    echo "[smoke] FAILED: leftover temporary files in the generated workload directory" >&2
+    exit 1
+fi
+
 # --- normalisation -----------------------------------------------------------
 # Mask everything that legitimately differs between runs, including the DB
 # password that YCSB echoes back in its "Command line:" banner.

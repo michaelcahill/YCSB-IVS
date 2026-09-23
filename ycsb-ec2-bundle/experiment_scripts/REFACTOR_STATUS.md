@@ -1,7 +1,7 @@
 # Refactor Status — experiment scripts
 
 Plan: [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) · Branch: `refactor/experiment-scripts`
-Last updated: **steps 1–3 (partly) complete** — one runner (`experiment.sh <backend>`), PostgreSQL backend module + registry + config layer; smoke goldens still byte-identical
+Last updated: **steps 1–4 complete** — one runner (`experiment.sh <backend>`), PostgreSQL backend module + registry + layered config, and **workload files are now read-only templates** (per-phase files generated into the experiment directory). Goldens identical apart from the intended `-P` paths.
 
 Read this file first after an interruption. Append to the **Log** at every meaningful
 checkpoint, and keep the **Step status** table current.
@@ -34,6 +34,7 @@ DB_PWD=USyd2025 REQUIRE_DB=1 bash tests/run_tests.sh
 
 # parts
 bash tools/check_scripts.sh                       # bash -n on all shell files, no DB
+bash tests/test_config_workload.sh                # config layer + workload generation, no DB
 python3 -m unittest discover -s tests -t tests    # mock-based runner tests, no DB
 DB_PWD=USyd2025 bash tests/smoke_authoritative.sh # real PG18 end-to-end vs goldens
 ```
@@ -50,9 +51,8 @@ work directory is kept for inspection.
 | 0 | Fix §10 bugs; capture smoke goldens; add CI checks | ✅ done | all four §10 bugs fixed and verified against real PG 18 + real YCSB; `tools/check_scripts.sh`, `tests/run_tests.sh`, `tests/smoke_authoritative.sh` + goldens added; stale mock test repaired (7 tests OK) |
 | 1 | Port core into `lib/{common,metrics,results,keysizes}.sh` | ✅ done | runner 1253 → 1022 lines; libs = common 119, results 75, keysizes 61, metrics 48. Function + top-level-name inventories verified identical to `HEAD` (nothing lost/duplicated); smoke goldens unchanged |
 | 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ✅ done | PG backend module (387 ln) with `backend::*` contract + legacy aliases; `lib/registry.sh` discovers and validates backends; `experiment.sh` is the single entry point; authoritative script is now a compatibility shim |
-| 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ⬜ pending | |
-| 3 | `config.sh` + `conf/` presets + alias shim + `--help/--dry-run/--list-backends` | ⏳ mostly done | layered config, `${VAR:-default}` everywhere, `config::derive_paths` last; flags `--var/--config/--epochs/--steps/--run-id/--type/--dry-run/--list-backends`; `conf/README.md` + 2 `.example` files. **Missing:** legacy alias shim (`DIST→EXTEND_DIST`, `EXPERIMENT_EPOCHS→NUM_EPOCHS`, …) needed before EC2 launchers can switch; `--mode baseline` / `--instrument` currently rejected |
-| 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | ⬜ pending | unit-testable without any DB |
+| 3 | `config.sh` + `conf/` presets + alias shim + `--help/--dry-run/--list-backends` | DONE | layered config with `${VAR:-default}` everywhere and `config::derive_paths` last; flags `--var/--config/--epochs/--steps/--run-id/--type/--scale/--workload/--experiment-dir/--dry-run/--list-backends`; legacy alias shim (`DIST`, `WORK`, `UNCHANGE_DB_NAME`, `EXPERIMENT_EPOCHS`, `EXPERIMENT_RUNS_PER_EPOCH`, `DB_PASSWORD`, `FIELD_LENGTH_ORIGINAL`, `vacuum`, `EXTEND_*`/`RUN_*` proportions) with deprecation lines; `conf/scale.{heavy,light}.env`; 31 assertions in `tests/test_config_workload.sh`. `--mode baseline` / `--instrument` still rejected until steps 6 and 8b |
+| 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | DONE | `lib/workload.sh`: one immutable, provenance-tagged file per YCSB invocation; the 22 in-place `perl -i -p` rewrites and the `awk` strip are gone from `lib/lifecycle.sh`; preflight no longer needs a writable workload; smoke asserts `../workloads` stays clean and that all 8 phase files exist |
 | 5 | `lifecycle.sh` engine + backend ports (PG row → postgrenosql → mariadb ×2 → mongodb → neo4j → couchbase) | ⬜ pending | only PG-family can be verified locally; others have no server here |
 | 6 | `--mode baseline`; delete legacy `*_baseline.sh` | ⬜ pending | |
 | 7 | `tools/bundle.sh`, `tools/deploy.sh`, README rewrite, gitignore | ⬜ pending | |
@@ -64,30 +64,61 @@ Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked
 
 ## Where to resume
 
-Next up is **step 4: workload generation** (`lib/workload.sh`, no writes to `workloads/`).
-Then, in order:
+Steps 3 and 4 are complete. Next up is **step 5**: move the engine onto the backend
+contract and port the remaining backends.
 
-1. Step 3 leftovers: legacy alias shim in `lib/config.sh` (required before existing EC2
-   launchers can use `experiment.sh`) and `conf/scale.{heavy,light}.env`.
-2. Step 4: replace the 22 in-place `perl -i -p` workload rewrites with generated files under
-   `$EXPERIMENT_DIR/workloads/` wired through `-P`; assert
-   `git diff --exit-code ../workloads` after a run.
-3. Step 5: switch `lib/lifecycle.sh` from the legacy PG aliases to `backend::*`, delete the
-   aliases, add the remaining backends, and retarget
-   `tests/test_postgresql_array_pg18.py` (it still points at `experiment_postgresql_array.sh`).
-4. Steps 6–8: baseline mode, tooling/README, `postgresql_json` backend + fullview instrumentation.
+1. Step 5a: in `lib/lifecycle.sh`, replace the legacy PostgreSQL names (`pg_exec`,
+   `collect_postgres_metrics`, `postgres_preflight`, `restore_comparison_database`,
+   `wait_for_idle_postgres`, `initialize_database`, `close_db`) with their `backend::*`
+   equivalents, and use the still-unused `backend::key_sizes` / `total_size` / `list_keys`
+   instead of the inline 34x size SQL; then delete the aliases from the backend module.
+2. Step 5b: add backends one at a time (`postgresql_row` -> `postgrenosql` ->
+   `mariadb_innodb` -> `mariadb_rocksdb` -> `mongodb` -> `neo4j` -> `couchbase`) and retire
+   each legacy script as an `exec` shim; retarget `tests/test_postgresql_array_pg18.py`,
+   which still points at `experiment_postgresql_array.sh`.
+3. Steps 6-8: baseline mode, tooling/README rewrite, `postgresql_json` backend plus fullview
+   instrumentation.
 
 Facts that save time when resuming:
 
-- `run_experiment()` in `lib/lifecycle.sh` is the engine (moved verbatim), so it still mutates
-  `$WORKLOAD_FILE` in place with `perl -i -p`, and still calls the legacy PG names
-  (`pg_exec`, `collect_postgres_metrics`, `postgres_preflight`,
-  `restore_comparison_database`, `wait_for_idle_postgres`, `initialize_database`, `close_db`)
-  which the backend module defines.
+- `$WORKLOAD_FILE` is a read-only template. Every phase gets its own file from
+  `workload::generate <phase> <iteration>` (`lib/workload.sh`) written to `$WORKLOAD_DIR`
+  (= `$EXPERIMENT_DIR/workloads`); the engine keeps the current one in `$WORKLOAD_PHASE`.
+  Phase overlays live in `workload::generate`'s `case`; values a run feeds back into later
+  phases (today `fieldlengthaverage`) are passed as extra `KEY=VALUE` arguments.
+- `write_result` still reads the lowercase globals (`recordcount`, `readproportion`, ...).
+  They used to come from `source "$WORKLOAD_FILE"`; `workload::apply_context <file>` now
+  publishes exactly those ten names, so keep it in sync with the CSV columns.
+- `run_experiment()` in `lib/lifecycle.sh` still calls the legacy PG names (`pg_exec`,
+  `collect_postgres_metrics`, `postgres_preflight`, `restore_comparison_database`,
+  `wait_for_idle_postgres`, `initialize_database`, `close_db`) which the backend module defines.
 - `backend::key_sizes`, `backend::total_size`, `backend::list_keys` and
-  `backend::size_expression` exist but are **unused so far** — they replace the inline 34×
+  `backend::size_expression` exist but are **unused so far** - they replace the inline 34x
   size SQL once the engine is rewired.
 - Run everything with `DB_PWD=USyd2025 REQUIRE_DB=1 bash tests/run_tests.sh`.
+
+## Findings during steps 3-4
+
+1. **Config files are parsed, not executed.** Sourcing them made "environment beats a
+   preset" impossible to honour (a sourced assignment always wins) and quietly turned
+   `conf/` into code execution. `config::load_file` accepts comments plus `KEY=VALUE`
+   assignments, rejects substitutions, and skips names that were already in the environment
+   when the runner started (`config::snapshot_env`, with `config::set_cli` for CLI flags).
+   Both existing `.example` files still parse unchanged.
+2. **Deviation from section 6 of the plan:** `conf/scale.<mode>.env` is applied with
+   `--config` instead of automatically. An auto-loaded preset would silently resize
+   datasets (the smoke suite runs a 200-record template while `SCALE=heavy`), which changes
+   what a run measures without saying so.
+3. **Preflight no longer requires a writable workload** (`-r`, not `-rw`); writability of
+   `$WORKLOAD_DIR` is checked by `workload::init`. The README's "create a clean launcher"
+   workaround (copy the template, then ~40 lines of `sed`) is obsolete for `experiment.sh`
+   runs; the README rewrite itself is step 7.
+4. **Goldens changed only where step 4 says they should:** the six YCSB `Command line:`
+   banners now name `-P <WORKDIR>/experiment/workloads/<phase>-iterNN.workload`. Re-captured,
+   then verified deterministic (2 compare runs, both entry points, all PASS).
+5. **Test-harness gotcha:** the alias test failed whenever the caller exported a canonical
+   name (`DB_PWD`), because a legacy value may not override one - that is the documented
+   precedence. Tests of legacy names now run under `env -i`.
 
 ## Findings during steps 2–3
 
@@ -174,6 +205,30 @@ Facts that save time when resuming:
 - EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.
 
 ## Log
+
+### 2026-09-24 — steps 3 and 4 complete
+
+- `lib/config.sh`: legacy launcher alias shim (`DIST`, `WORK`, `UNCHANGE_DB_NAME`,
+  `EXPERIMENT_EPOCHS`, `EXPERIMENT_RUNS_PER_EPOCH`, `DB_PASSWORD`,
+  `FIELD_LENGTH_ORIGINAL`, `vacuum`, `EXTEND_*`/`RUN_*` proportions), each with a
+  deprecation line; canonical name wins when both are set. Instrumentation variables of
+  step 8b are reported as unsupported instead of silently ignored.
+- Configuration files are now **parsed, not executed** (`config::load_file`), which is what
+  makes "environment beats presets" true; `conf/db.<backend>.env` is loaded automatically,
+  `conf/scale.{heavy,light}.env` explicitly with `--config`. New flags: `--scale`,
+  `--workload`, `--experiment-dir`; `--dry-run` lists the files applied.
+- `lib/workload.sh`: `workload::generate <phase> <iteration>` builds one immutable,
+  provenance-tagged properties file per YCSB invocation under `$EXPERIMENT_DIR/workloads`;
+  `workload::apply_context` publishes the ten globals `write_result` records. `lib/lifecycle.sh`
+  lost all 22 `perl -i -p` rewrites, the conditional `fieldlengthdistribution` append and the
+  `awk` strip; preflight no longer asks for a writable workload.
+- Tests: new `tests/test_config_workload.sh` (31 assertions: precedence, aliases, parsing
+  errors, overlays, template immutability) wired into `run_tests.sh`; the smoke suite now
+  fails if `../workloads` is touched, if a phase file is missing, if a generated file has no
+  provenance header, or if temporary files are left behind.
+- Goldens re-captured (only the six YCSB `Command line:` `-P` paths changed) and verified:
+  static checks PASS · 31 shell + 7 python tests OK · smoke PASS twice plus through the
+  `experiment.sh postgresql_textarray` entry point.
 
 ### 2026-09-23 — steps 2 and (part of) 3
 
