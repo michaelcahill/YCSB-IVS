@@ -32,6 +32,19 @@ run_ycsb() {
     return "$rc"
 }
 
+# Point the binding at one database. The property NAMES are a binding detail: the JDBC
+# bindings read db.url/db.user/db.passwd, PostgreNoSQL reads postgrenosql.url/…, so the
+# prefix is configured per backend (BINDING_PARAM_PREFIX) instead of hardcoded here.
+# Sets the global DB_PARAMS array; every YCSB invocation expands it.
+binding_db_params() {
+    local url="${1:?database url required}" prefix="${BINDING_PARAM_PREFIX:-db}"
+    DB_PARAMS=(
+        -p "${prefix}.url=$url"
+        -p "${prefix}.user=$DB_USERNAME"
+        -p "${prefix}.passwd=$DB_PWD"
+    )
+}
+
 run_with_metrics() {
     local db_name=$1
     local phase=$2
@@ -108,6 +121,8 @@ run_with_metrics() {
 # Run the whole experiment. Assumes libs + a backend are sourced and config has been
 # applied (experiment.sh does both).
 run_experiment() {
+local -a DB_PARAMS=()
+
 # All read-only checks must finish before clearing outputs or dropping databases.
 start_logging
 log "START preflight"
@@ -117,8 +132,8 @@ log "END preflight"
 mkdir -p "$(dirname "$OUTPUT_FILE")" "$(dirname "$KEY_SIZE_FILE_AFTER_EXTEND")"
 
 # Clear the log file and previous backups
-> "$PLAN_LOG"
-> $HISTOGRAM_FILE
+: > "$PLAN_LOG"
+: > "$HISTOGRAM_FILE"
 
 rm -rf "$KEY_SIZE_LOG"
 rm -f "$KEY_SIZE_FILE_AFTER_EXTEND" "$KEY_SIZE_FILE_AFTER_RUN"
@@ -138,14 +153,13 @@ original_operationcount="${operationcount_override:-$(workload::get_value "$WORK
 
 WORKLOAD_PHASE="$(workload::generate load 0)"
 workload::apply_context "$WORKLOAD_PHASE"
+binding_db_params "$DB_URL"
 
 run_with_metrics "$DB_NAME" "$phase" "$step" "$OUTPUT_CSV" \
 	"$YCSB" load "$YCSB_BINDING" -s \
     -P "$WORKLOAD_PHASE" \
     -P "$JDBC_PROPERTIES" \
-    -p db.url="$DB_URL" \
-    -p db.user="$DB_USERNAME" \
-    -p db.passwd="$DB_PWD" \
+    "${DB_PARAMS[@]}" \
     -p fieldlengthdistribution=constant \
     -p fieldlength="$fieldlengthoriginal"
 total_size_initial_load=$(backend::total_size "$DB_NAME")
@@ -158,12 +172,11 @@ write_result "TRUE"
 phase="reference-load"
 WORKLOAD_PHASE="$(workload::generate reference-load 0)"
 workload::apply_context "$WORKLOAD_PHASE"
+binding_db_params "$UNCHANGED_DB_URL"
 run_with_metrics "$UNCHANGED_DB_NAME" "$phase" "$step" "$OUTPUT_CSV" \
 	"$YCSB" load "$YCSB_BINDING" -s \
     -P "$WORKLOAD_PHASE" -P "$JDBC_PROPERTIES" \
-    -p db.url="$UNCHANGED_DB_URL" \
-    -p db.user="$DB_USERNAME" \
-    -p db.passwd="$DB_PWD" \
+    "${DB_PARAMS[@]}" \
     -p fieldlengthdistribution=constant \
     -p fieldlength="$fieldlengthoriginal"
 total_size_reference_load=$(backend::total_size "$UNCHANGED_DB_NAME")
@@ -185,12 +198,11 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         # Execute the extend phase
         log "=== Executing the extend phase with extendproportion=1 and other proportions=0 ==="
         # Capture both stdout and stderr to capture status messages
+        binding_db_params "$DB_URL"
         run_with_metrics "$DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
             "$YCSB" run "$YCSB_BINDING" -s \
             -P "$WORKLOAD_PHASE" -P "$JDBC_PROPERTIES" \
-            -p db.url="$DB_URL" \
-            -p db.user="$DB_USERNAME" \
-            -p db.passwd="$DB_PWD" \
+            "${DB_PARAMS[@]}" \
             -p fieldlengthdistribution=constant \
             -p fieldlength="$fieldlengthoriginal"
 
@@ -318,13 +330,12 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         # Execute the run phase
         log "Preparing run workload: read=$readproportion update=$updateproportion extend=$extendproportion"
         phase="run"
+        binding_db_params "$DB_URL"
         run_with_metrics "$DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
         "$YCSB" run "$YCSB_BINDING" -s \
         -P "$WORKLOAD_PHASE" \
         -P "$JDBC_PROPERTIES" \
-        -p db.url="$DB_URL" \
-        -p db.user="$DB_USERNAME" \
-        -p db.passwd="$DB_PWD" \
+        "${DB_PARAMS[@]}" \
         -p fieldlengthhistogram="$HISTOGRAM_FILE"
 
         collect_cpu_memory_metrics
@@ -358,13 +369,12 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         phase="reference"
         WORKLOAD_PHASE="$(workload::generate reference "$iteration")"
         workload::apply_context "$WORKLOAD_PHASE"
+        binding_db_params "$UNCHANGED_DB_URL"
         run_with_metrics "$UNCHANGED_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
         "$YCSB" run "$YCSB_BINDING" -s \
         -P "$WORKLOAD_PHASE" \
         -P "$JDBC_PROPERTIES" \
-        -p db.url="$UNCHANGED_DB_URL" \
-        -p db.user="$DB_USERNAME" \
-        -p db.passwd="$DB_PWD" \
+        "${DB_PARAMS[@]}" \
         -p fieldlengthhistogram="$HISTOGRAM_FILE"
         
         collect_cpu_memory_metrics
@@ -403,13 +413,12 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
 
 			WORKLOAD_PHASE="$(workload::generate clean-run "$iteration")"
                 workload::apply_context "$WORKLOAD_PHASE"
+			binding_db_params "$BACKUP_URL"
 			run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
                 "$YCSB" run "$YCSB_BINDING" -s \
                 -P "$WORKLOAD_PHASE" \
                 -P "$JDBC_PROPERTIES" \
-                -p db.url="$BACKUP_URL" \
-                -p db.user="$DB_USERNAME" \
-                -p db.passwd="$DB_PWD" \
+                "${DB_PARAMS[@]}" \
                 -p fieldlengthhistogram="$HISTOGRAM_FILE"
                 
 			collect_cpu_memory_metrics
@@ -464,7 +473,8 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             # Resetting the database with new data load
             phase="comparison-load"
             log "=== Executing the load phase for the comparison study ==="
-            run_ycsb "comparison-load" load "$YCSB_BINDING" -s -P "$WORKLOAD_PHASE" -P "$JDBC_PROPERTIES" -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD"
+            binding_db_params "$BACKUP_URL"
+            run_ycsb "comparison-load" load "$YCSB_BINDING" -s -P "$WORKLOAD_PHASE" -P "$JDBC_PROPERTIES" "${DB_PARAMS[@]}"
             total_size_comparison_load=$(backend::total_size "$BACKUP_DB_NAME")
             log "Comparison-load verification - Epoch:$epoch Step:$step TotalSize:$total_size_comparison_load ExpectedFieldLength:$fieldlengthaverage"
 
@@ -483,13 +493,12 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             # Execute the run phase
             log "Preparing run workload: read=$readproportion update=$updateproportion extend=$extendproportion"
             phase="avg-run"
+            binding_db_params "$BACKUP_URL"
             run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
                 "$YCSB" run "$YCSB_BINDING" -s \
                 -P "$WORKLOAD_PHASE" \
                 -P "$JDBC_PROPERTIES" \
-                -p db.url="$BACKUP_URL" \
-                -p db.user="$DB_USERNAME" \
-                -p db.passwd="$DB_PWD"
+                "${DB_PARAMS[@]}"
 
             collect_cpu_memory_metrics
             backend::collect_metrics $BACKUP_DB_NAME

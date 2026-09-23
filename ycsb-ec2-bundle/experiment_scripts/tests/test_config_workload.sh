@@ -3,6 +3,8 @@
 # No database and no YCSB run are needed:
 #
 #   bash tests/test_config_workload.sh
+#
+# shellcheck disable=SC1090  # backends are sourced by discovered name, not by a constant path
 set -uo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

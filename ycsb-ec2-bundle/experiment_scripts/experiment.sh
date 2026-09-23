@@ -21,7 +21,9 @@ cd "$SCRIPT_DIR"
 
 LIB_DIR="$SCRIPT_DIR/lib"
 CONF_DIR="$SCRIPT_DIR/conf"
-export YCSB_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck disable=SC2155  # the cd cannot fail; assigning first would need a second line
+YCSB_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
+export YCSB_HOME
 export PATH="$YCSB_HOME/bin:$PATH"
 YCSB="../bin/ycsb.sh"
 

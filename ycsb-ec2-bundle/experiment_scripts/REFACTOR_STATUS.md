@@ -1,7 +1,8 @@
 # Refactor Status — experiment scripts
 
 Plan: [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) · Branch: `refactor/experiment-scripts`
-Last updated: **steps 1–4 complete; step 5 in progress (PostgreSQL done)** — one runner
+Last updated: **steps 1–4 complete; step 5 in progress (all PostgreSQL backends done,**
+**including postgrenosql, verified end-to-end)** — one runner
 (`experiment.sh <backend>`), two verified PostgreSQL backends behind a shared module, an engine
 that calls nothing but `backend::*`, a layered config layer with a legacy-launcher alias shim,
 and **workload files are read-only templates** (one generated file per phase in the experiment
@@ -22,8 +23,9 @@ checkpoint, and keep the **Step status** table current.
 | psql/createdb/dropdb/pg_dump | ✅ PG 18.6 client | satisfies the scripts' PG18 preflight |
 | `jdbc-array` binding jar | ⚠️ not built | `jdbc-array/target/` absent; build: `mvn -o -Psource-run -pl site.ycsb:jdbc-array-binding -am package -DskipTests` (log `/tmp/mvn-jdbc-array.log`) |
 | Other module jars | ✅ present | `core/target/core-0.18.0-SNAPSHOT.jar`, `jdbc/`, `jdbc-array-json/`, `postgrenosql/` |
-| shellcheck | ❌ not installed | CI check uses `bash -n` only until it can be installed |
+| shellcheck | ✅ installed (2026-09-24) | `tools/check_scripts.sh` now runs it: the harness (`lib/`, `experiment.sh`, `tests/`, `tools/`) must be clean, 16 legacy scripts warn without failing (list only shrinks; `SHELLCHECK_STRICT=1` fails on everything). SC2034/SC2154 are excluded globally because these scripts share globals across sourced files |
 | sudo | ❌ password required | cannot create PG roles or touch the server config; use the existing `ycsb` role |
+| podman | ✅ working, can pull images | found 2026-09-24: `podman run docker.io/library/mariadb:11` starts and answers on a published port (rootless). No docker, no local mariadb/mongo/neo4j/couchbase server binaries — containers are how the remaining backends can be smoke-tested here |
 
 Note: the smoke suite needs the `jdbc-array` binding built once:
 `mvn -o -pl site.ycsb:jdbc-array-binding -am package -DskipTests` (already done here).
@@ -58,7 +60,7 @@ work directory is kept for inspection.
 | 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ✅ done | PG backend module (387 ln) with `backend::*` contract + legacy aliases; `lib/registry.sh` discovers and validates backends; `experiment.sh` is the single entry point; authoritative script is now a compatibility shim |
 | 3 | `config.sh` + `conf/` presets + alias shim + `--help/--dry-run/--list-backends` | DONE | layered config with `${VAR:-default}` everywhere and `config::derive_paths` last; flags `--var/--config/--epochs/--steps/--run-id/--type/--scale/--workload/--experiment-dir/--dry-run/--list-backends`; legacy alias shim (`DIST`, `WORK`, `UNCHANGE_DB_NAME`, `EXPERIMENT_EPOCHS`, `EXPERIMENT_RUNS_PER_EPOCH`, `DB_PASSWORD`, `FIELD_LENGTH_ORIGINAL`, `vacuum`, `EXTEND_*`/`RUN_*` proportions) with deprecation lines; `conf/scale.{heavy,light}.env`; 31 assertions in `tests/test_config_workload.sh`. `--mode baseline` / `--instrument` still rejected until steps 6 and 8b |
 | 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | DONE | `lib/workload.sh`: one immutable, provenance-tagged file per YCSB invocation; the 22 in-place `perl -i -p` rewrites and the `awk` strip are gone from `lib/lifecycle.sh`; preflight no longer needs a writable workload; smoke asserts `../workloads` stays clean and that all 8 phase files exist |
-| 5 | `lifecycle.sh` engine + backend ports (PG row -> postgrenosql -> mariadb x2 -> mongodb -> neo4j -> couchbase) | IN PROGRESS | **done:** engine drives only `backend::*`; PostgreSQL split into `_postgresql_common.sh` + `postgresql_textarray` / **`postgresql_row`** (both verified end-to-end); `experiment_postgresql.sh` and `experiment_postgresql_array.sh` are shims. **Remaining:** postgrenosql, mariadb x2, mongodb, neo4j, couchbase - no servers on this machine. |
+| 5 | `lifecycle.sh` engine + backend ports (PG row -> postgrenosql -> mariadb x2 -> mongodb -> neo4j -> couchbase) | IN PROGRESS | **done:** engine drives only `backend::*`; PostgreSQL split into `_postgresql_common.sh` + `postgresql_textarray` / **`postgresql_row`** / **`postgrenosql`** (all three verified end-to-end); `experiment_postgresql.sh`, `experiment_postgresql_array.sh` and `experiment_postgrenosql.sh` are shims. **Remaining:** mariadb x2, mongodb, neo4j, couchbase - reachable via podman containers (see Environment). |
 | 6 | `--mode baseline`; delete legacy `*_baseline.sh` | ⬜ pending | |
 | 7 | `tools/bundle.sh`, `tools/deploy.sh`, README rewrite, gitignore | ⬜ pending | |
 | 8a | `postgresql_json` backend | ⬜ pending | |
@@ -69,19 +71,28 @@ Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked
 
 ## Where to resume
 
-Step 5 is half done and PostgreSQL is fully on the new architecture: the engine calls nothing
-but `backend::*`, the PostgreSQL specifics live in `lib/backends/_postgresql_common.sh` plus
-one file per schema (`postgresql_textarray`, **`postgresql_row`**), and both backends pass an
-end-to-end run here. Next up is **step 5b, continuing with postgrenosql**.
+All four PostgreSQL-family backends are on the new architecture: the engine calls nothing but
+`backend::*`, the PostgreSQL specifics live in `lib/backends/_postgresql_common.sh` plus one
+file per schema (`postgresql_textarray`, **`postgresql_row`**, **`postgrenosql`**), and all
+three pass an end-to-end run here (`tests/smoke_backend.sh <backend>`, wired into
+`run_tests.sh`). Next up is **step 5b with mariadb_innodb**.
 
+0. **Servers for the remaining backends:** podman works on this machine and can pull images,
+   so MariaDB / MongoDB / Neo4j / Couchbase can each be smoke-tested in a container instead of
+   shipping unverified modules (`DB_HOST=127.0.0.1 DB_PORT=<mapped> bash
+tests/smoke_backend.sh <backend>`). Caveats found so far: the MariaDB legacy script also uses
+   `sudo ../inno_space/inno` for the B-tree height and samples `pgrep -x mariadbd`, neither of
+   which exists in a container; and no MySQL/MariaDB JDBC driver is in `jdbc/target/dependency`
+   (only `postgresql-*.jar`), so that dependency has to be fetched before a MariaDB run.
 1. Prerequisite for non-PostgreSQL backends is done: the statistics columns are owned by the
    backend (`backend::metric_names`, defined in `_postgresql_common.sh`) and `lib/metrics.sh`
    keeps only CPU/memory sampling of `host_os_user`. A new hygiene test fails if PostgreSQL
    names reappear in core.
-2. Port one at a time: postgrenosql -> mariadb_innodb -> mariadb_rocksdb -> mongodb ->
-   neo4j -> couchbase. Each needs a reachable server for `tests/smoke_backend.sh <backend>`;
-   until then the module stays unverified and its legacy script is left in place (no shim, no
-   deletion).
+2. Port one at a time: ~~postgrenosql~~ -> mariadb_innodb -> mariadb_rocksdb -> mongodb ->
+   neo4j -> couchbase. A ported backend gets its module, its legacy script becomes a one-line
+   shim, and it is added to the `for backend in ...` list in `tests/run_tests.sh` only once a
+   server answers for it here; otherwise the module stays unverified and the legacy script is
+   left alone (no shim, no deletion).
 3. Steps 6-8: baseline mode, tooling/README rewrite, `postgresql_json` backend plus fullview
    instrumentation.
 
@@ -248,6 +259,52 @@ Facts that save time when resuming:
 - EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.
 
 ## Log
+
+### 2026-09-24 — shellcheck became available, gate turned into a ratchet
+
+- `tools/check_scripts.sh` used to skip shellcheck; it now runs it per file. Strict for the
+  harness, advisory (with a printed count) for the 16 legacy runners in
+  `LEGACY_WITH_WARNINGS`, so the gate is green today and cannot get worse: a file leaves the
+  list when it is ported or deleted, and nothing new may join it.
+- SC2034/SC2154 excluded project-wide — every one of the 72 hits was a variable assigned in
+  one sourced file and read in another (`readproportion_extend`, `metric_field_names`,
+  `iteration`), which per-file analysis cannot see.
+- Real fixes in the harness: `> $PLAN_LOG` / `> $HISTOGRAM_FILE` → `: > "$…"` (one was also
+  unquoted), `export "$assignment"` documented as intentional, `YCSB_HOME=` split from its
+  export in `experiment.sh` and `tests/test_logging.sh`, `mapfile` instead of `size_files=(
+  $(find …))`, shebang added to `_postgresql_common.sh` (it had a stray duplicate header
+  mid-file from the step-5 extraction), SC1090 disabled in the backend-contract test.
+- `watcher.sh` turned out clean under the new exclusions and left the legacy list.
+
+### 2026-09-24 — step 5b: postgrenosql backend (verified end-to-end)
+
+- `lib/backends/postgrenosql.sh`: JSONB document schema (`YCSB_KEY VARCHAR(255)`,
+  `YCSB_VALUE JSONB`), size expression `octet_length(ycsb_value::text)`, binding
+  `postgrenosql`, properties `../postgrenosql/conf/postgrenosql.properties`. Everything else
+  (metrics, preflight, dump/restore, idle wait, size helpers) is inherited from
+  `_postgresql_common.sh`, so its results CSV has the same 74 columns as the other backends
+  instead of the legacy script's smaller set.
+- New contract point for non-JDBC bindings: the connection property **prefix** is configured
+  (`BINDING_PARAM_PREFIX`, default `db`) and `binding_db_params <url>` in `lib/lifecycle.sh`
+  builds `-p <prefix>.url/.user/.passwd` for each of the eight YCSB invocations. `db.*` was
+  hardcoded 24 times before; the engine now names no binding property at all.
+- `postgresql::base_config` takes the binding's properties file as an argument, so a backend
+  does not have to re-derive it after the shared defaults have already filled the variable
+  (the first attempt silently kept `../jdbc-binding/conf/postgres.properties`).
+- `experiment_postgrenosql.sh` is a one-line shim; `conf/db.postgrenosql.env.example` added,
+  and `conf/db.postgresql.env.example` now names the two files it can be copied to.
+- Deliberate behaviour change: PostgreSQL >= 18 is required (the shared metrics query uses
+  `pg_stat_checkpointer`), where the legacy script still had pre-17 fallbacks.
+- Tests: `tests/run_tests.sh` runs `smoke_backend.sh postgrenosql` next to `postgresql_row`;
+  full suite PASS — static checks · shell + python tests · authoritative smoke against
+  unchanged goldens (the `-p db.*` -> `${DB_PARAMS[@]}` rewrite is output-identical) ·
+  postgresql_row and postgrenosql structural smokes.
+- Found while checking extend: `log` in `lib/common.sh` allow-lists message shapes, so the
+  engine's `Initial-load verification - TotalSize:…`, `Extend verification - …` and
+  `Field length average:…` lines never reach the run log (pre-existing, also on `master`;
+  worth fixing when the size helpers are wired in).
+- Environment discovery: **podman works here and can pull images**, so the remaining backends
+  do not have to ship unverified — see the Environment table.
 
 ### 2026-09-24 — step 5b: results-CSV schema belongs to the backend
 

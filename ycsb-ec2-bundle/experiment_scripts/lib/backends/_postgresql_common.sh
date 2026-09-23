@@ -1,3 +1,14 @@
+#!/usr/bin/env bash
+# Part of a PostgreSQL backend module; sourced by lib/backends/postgresql_*.sh and
+# postgrenosql.sh, never run directly and never advertised as a backend itself (the registry
+# skips files that start with an underscore).
+#
+# Everything the PostgreSQL backends have in common: the CLI wrapper, the PG18 statistics
+# snapshot, preflight, dump/restore, the idle wait, and the size helpers that are derived from
+# backend::size_expression. A backend module supplies what differs — schema DDL, the
+# value-size expression, metadata, connection defaults — by defining these contract names
+# AFTER sourcing this file (bash keeps the later definition).
+
 PG_MAINTENANCE_DB="${PG_MAINTENANCE_DB:-postgres}"
 
 # ---------------------------------------------------------------------------
@@ -44,15 +55,6 @@ backend::metric_names() {
     printf '%s\n' "${metric_field_names[@]}"
 }
 
-
-#!/usr/bin/env bash
-# Part of a PostgreSQL backend module; sourced by lib/backends/postgresql_*.sh.
-#
-# Everything the PostgreSQL backends have in common: the CLI wrapper, the PG18 statistics
-# snapshot, preflight, dump/restore, the idle wait, and the size helpers that are derived
-# from backend::size_expression. A backend module supplies what differs — schema DDL, the
-# value-size expression, metadata, connection defaults — by defining these contract names
-# AFTER sourcing this file (bash keeps the later definition).
 
 pg_cli() {
     local tool="$1"
@@ -385,8 +387,11 @@ backend::list_keys() {
 # ---------------------------------------------------------------------------
 
 # Connection defaults shared by every PostgreSQL backend. A module calls this from its own
-# backend::default_config and then adjusts what differs (schema name, JDBC properties file).
+# backend::default_config, optionally with the path of its binding's properties file, and then
+# adjusts anything else that differs (schema name, property prefix, ...).
 postgresql::base_config() {
+    local properties_default="${1:-../jdbc-binding/conf/postgres.properties}"
+
     DB_NAME="${DB_NAME:-ycsb}"
     BACKUP_DB_NAME="${BACKUP_DB_NAME:-ycsb_backup}"
     UNCHANGED_DB_NAME="${UNCHANGED_DB_NAME:-ycsb_unchange}"
@@ -401,7 +406,7 @@ postgresql::base_config() {
     DB_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$DB_NAME"
     BACKUP_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$BACKUP_DB_NAME"
     UNCHANGED_DB_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$UNCHANGED_DB_NAME"
-    JDBC_PROPERTIES="${JDBC_PROPERTIES:-../jdbc-binding/conf/postgres.properties}"
+    JDBC_PROPERTIES="${JDBC_PROPERTIES:-$properties_default}"
 
     # CPU/memory usage is sampled from the server's OS account.
     HOST_OS_USER="${HOST_OS_USER:-$(registry::info host_os_user)}"

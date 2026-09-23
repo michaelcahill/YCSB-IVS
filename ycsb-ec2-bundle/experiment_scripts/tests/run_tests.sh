@@ -48,7 +48,7 @@ if db_available; then
     bash tests/smoke_authoritative.sh
     # Structural check of every backend whose server is reachable here. The PostgreSQL
     # backends are; the others need servers this machine does not run.
-    for backend in postgresql_row; do
+    for backend in postgresql_row postgrenosql; do
         bash tests/smoke_backend.sh "$backend"
     done
 elif [[ "${REQUIRE_DB:-0}" == 1 ]]; then

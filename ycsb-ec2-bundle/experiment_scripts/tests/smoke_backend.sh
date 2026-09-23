@@ -108,7 +108,7 @@ rows=$(( $(wc -l < "$CSV") - 1 ))
    "avg-run clean-run extend load reference run " ]] || fail "unexpected phase set in CSV"
 echo "[backend-smoke] results CSV: $rows rows, $(head -1 "$CSV" | awk -F, '{print NF}') columns"
 
-size_files=( $(find "$EXPERIMENT_DIR/data/value_size_data" -name '*.csv' 2>/dev/null | sort) )
+mapfile -t size_files < <(find "$EXPERIMENT_DIR/data/value_size_data" -name '*.csv' 2>/dev/null | sort)
 (( ${#size_files[@]} == 2 )) || fail "expected before/after value-size CSVs, found ${#size_files[@]}"
 for f in "${size_files[@]}"; do
     [[ -s "$f" ]] || fail "value-size artefact is empty: $f"

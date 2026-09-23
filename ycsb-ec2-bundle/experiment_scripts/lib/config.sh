@@ -35,6 +35,7 @@ config::snapshot_env() {
 config::set_cli() {
     local assignment="${1:?KEY=VALUE required}" key
     key="${assignment%%=*}"
+    # shellcheck disable=SC2163  # the assignment string itself is what we export
     export "$assignment"
     CONFIG_ENV_NAMES["$key"]=1
 }
@@ -178,6 +179,10 @@ config::warn_deferred_legacy() {
 config::init_defaults() {
     # Connection / schema settings come from the backend.
     backend::default_config
+
+    # Prefix of the YCSB properties that carry the connection settings. The JDBC bindings
+    # read db.url/db.user/db.passwd, other bindings namespace them (postgrenosql.url, …).
+    BINDING_PARAM_PREFIX="${BINDING_PARAM_PREFIX:-db}"
 
     # --- experiment identity ---------------------------------------------------
     TYPE="${TYPE:-$(registry::info default_type)}"
