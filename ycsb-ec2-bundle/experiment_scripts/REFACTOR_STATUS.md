@@ -1,7 +1,7 @@
 # Refactor Status — experiment scripts
 
 Plan: [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) · Branch: `refactor/experiment-scripts`
-Last updated: **steps 1–5 complete — every backend is ported and verified end-to-end** (nine:
+Last updated: **steps 1–6 complete — every backend is ported and verified end-to-end** (nine:
 `postgresql_textarray`, `postgresql_row`, `postgresql_json`, `postgrenosql`, `mariadb_innodb`,
 `mariadb_rocksdb`, `mongodb`, `neo4j`, `couchbase`) — one runner (`experiment.sh <backend>`), nine
 verified backends behind shared modules, an engine that calls nothing but `backend::*`, a layered
@@ -11,8 +11,9 @@ directory). Goldens unchanged apart from the intended `-P` paths. The single lef
 the shim for `experiment_postgresql_array_json.sh` — is **held by your decision**: that script is
 `run_postgresql_array_json_full_visibility.sh`'s callee, so shimming it would delete full
 visibility before the EC2 gate that exists to protect it; it folds into step 8c. Next up:
-**step 6 (`--mode baseline`)**, then step 7 (tooling + README). There is no instrumentation module
-any more.
+**step 7 (bundle/deploy tooling + README rewrite)**, then the EC2-gated 8c. Step 6 delivered
+`--mode baseline`: one set of phase steps, two engines (`mainline`, `baseline`), and the nine
+legacy `experiment_*_baseline.sh` scripts are gone. There is no instrumentation module any more.
 
 Read this file first after an interruption. Append to the **Log** at every meaningful
 checkpoint, and keep the **Step status** table current.
@@ -55,6 +56,7 @@ bash tests/test_config_workload.sh                 # config layer + workload gen
 python3 -m unittest discover -s tests -t tests     # mock-based runner tests, no DB
 DB_PWD=USyd2025 bash tests/smoke_authoritative.sh  # real PG18 end-to-end vs goldens
 DB_PWD=USyd2025 bash tests/smoke_backend.sh mariadb_innodb  # structural, any reachable backend
+DB_PWD=USyd2025 bash tests/smoke_backend.sh postgresql_textarray baseline   # the --mode baseline engine
 bash tests/smoke_backend.sh mongodb|neo4j|couchbase  # needs the matching container
 bash tests/smoke_backend.sh mariadb_rocksdb         # needs the MyRocks image (conf/db.mariadb_rocksdb.env)
 
@@ -77,7 +79,7 @@ directory is kept for inspection.
 | 3 | `config.sh` + `conf/` presets + alias shim + help/dry-run | ✅ done | parsed-not-executed config; legacy aliases with deprecation lines |
 | 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | ✅ done | immutable provenance-tagged files; all in-place rewrites gone; smoke asserts `../workloads` stays clean |
 | 5 | Engine + backend ports | ✅ **done** | **nine backends, all verified end-to-end:** engine drives only `backend::*`; PostgreSQL split into `_postgresql_common.sh` + `postgresql_textarray`/`postgresql_row`/`postgresql_json`/`postgrenosql`, MariaDB into `_mariadb_common.sh` + `mariadb_innodb`/`mariadb_rocksdb`, plus `mongodb`, `neo4j`, `couchbase` — each ported legacy script is a one-line shim and in `BACKEND_SMOKES`. Only the `experiment_postgresql_array_json.sh` shim is outstanding, **deliberately held** (its sibling launcher execs it) and therefore folded into 8c |
-| 6 | `--mode baseline`; delete legacy `*_baseline.sh` | ⬜ pending | `--mode baseline` currently rejected by `experiment.sh` |
+| 6 | `--mode baseline`; delete legacy `*_baseline.sh` | ✅ done | `lib/lifecycle_baseline.sh` is a sequence of the shared steps (a unit test forbids it from re-implementing one); `run_experiment` dispatches on `EXPERIMENT_MODE`; nine legacy baseline runners deleted, their CSV headers kept as `tests/golden/legacy_csv_columns.txt`; goldens unchanged; baseline smoke PASS ×3 backends |
 | 7 | `tools/bundle.sh`, `tools/deploy.sh`, README rewrite, gitignore | ⬜ pending | |
 | 8a/8b | ~~`postgresql_json` backend · fullview instrumentation module~~ | ➖ folded/cancelled | 8a → step 5(b) **done** (`postgresql_json`, verified); 8b **cancelled** — WAL / `pg_stat_statements` / residency / prewarm / checkpoint-log / sampling / detoast probes are discarded (plan §4), and the `--instrument` placeholder is deleted from `experiment.sh` |
 | 8c | Delete remaining shims/legacy scripts (+ `benchmark_observability.py`) | ⬜ pending | **gate:** only after user confirms on EC2 hardware — legacy array_json is the provenance of existing full-visibility evidence |
@@ -86,8 +88,9 @@ Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked · ➖ cancell
 
 ## Where to resume
 
-All backends are ported. Next is **step 6 (`--mode baseline`)**; the items below are the
-carry-overs to remember while doing it.
+All backends are ported and both phase sequences exist. Next is **step 7 (tooling + README
+rewrite: `tools/bundle.sh`, `tools/deploy.sh`, `.gitignore`, remove committed `.pyc`, rewrite the
+runbook)**, then the EC2-gated 8c. The items below are the carry-overs to remember while doing it.
 
 - **Held for 8c: the `experiment_postgresql_array_json.sh` shim.** The plan's last item of step 5
   is a one-line shim mapping `VALUE_VARIANT` → backend, but
@@ -110,7 +113,23 @@ carry-overs to remember while doing it.
   read from `SHOW GLOBAL STATUS 'Rocksdb%'` plus `information_schema.ROCKSDB_CFSTATS /
   ROCKSDB_DBSTATS / ROCKSDB_SST_PROPS`. Verified end-to-end on a real MyRocks server (57-column
   CSV, dump/restore included, compaction/WAL/stall counters non-zero). Its legacy runner is a shim
-  and left `LEGACY_WITH_WARNINGS`; the *_baseline sibling waits for step 6.
+  and left `LEGACY_WITH_WARNINGS`; its `*_baseline` sibling was deleted with step 6.
+- **Done: `--mode baseline` (step 6).** `run_experiment()` in `lib/lifecycle.sh` is now a dispatcher
+  over `EXPERIMENT_MODE`, and the old single loop body is a set of named phase steps
+  (`experiment_bootstrap`, `run_load_phase`, `run_reference_load_phase`, `run_extend_phase`,
+  `merge_value_sizes`, `vacuum_if_enabled`, `snapshot_keys`/`remove_new_keys`,
+  `run_measured_phase`, `run_reference_phase`, `run_comparison_phases`, `experiment_complete`).
+  `lib/lifecycle_baseline.sh` sequences a subset of them; the unit test
+  `baseline_engine_reuses_the_steps` fails if that file ever mentions `run_with_metrics`,
+  `run_ycsb`, `write_result`, `$YCSB`, `collect_metrics`, `workload::generate` or `backend::`, which
+  is the structural guarantee that the two modes cannot drift. `tests/smoke_backend.sh <backend>
+  [mainline|baseline]` is mode-aware (phase list, CSV row/phase set, number of value-size files,
+  forbidden phases, and — PostgreSQL only — that neither comparison database was created) and now
+  asserts the **whole** CSV header prefix against `metrics::header`, so "same schema in both modes"
+  is checked rather than assumed. Nine legacy `experiment_*_baseline.sh` deleted; their CSV headers
+  live on as `tests/golden/legacy_csv_columns.txt`, read by the column-comparability test (the only
+  reason those scripts were still load-bearing). `run_tests.sh` has a new step that runs the baseline
+  smoke on the PostgreSQL server it already requires.
 
 - `./experiment.sh <backend> --check` runs that backend's preflight (server reachable, role
   allowed to create/drop, build artifacts present) and exits without benchmarking — that is
@@ -144,11 +163,22 @@ carry-overs to remember while doing it.
   all five of its LSM columns were empty on this engine. Statistics now come from
   `information_schema.ROCKSDB_CFSTATS / ROCKSDB_DBSTATS / ROCKSDB_SST_PROPS`, and the legacy
   `sudo du /var/lib/mysql/#rocksdb/*.sst` is replaced by `total_sst_size` from SQL.
-- Steps 6–7: baseline mode, tooling/README rewrite (see plan §8). No instrumentation layer —
+- Step 7: tooling + README rewrite (see plan §8) — the runbook still documents neither
+  `experiment.sh`'s options nor `--mode baseline`. No instrumentation layer —
   plan §4 records why the array_json samplers are dropped rather than ported.
 
 ## Facts that save time
 
+- **Two engines, one set of steps.** `run_experiment()` dispatches on `EXPERIMENT_MODE`
+  (`mainline` | `baseline`); both engines call the same phase-step functions in
+  `lib/lifecycle.sh`. A new phase is a new step function called by the engine(s) that run it —
+  never a copied loop body (the forbidden duplication is asserted). A mode may only change: the
+  phase sequence, `MODE_SUFFIX` (its artefact-name suffix, so modes cannot overwrite each other),
+  which databases it creates, and whether preflight requires pg_dump.
+- **Test-authoring gotcha in this repo's shell tests:** bash suppresses `errexit` inside an
+  `if`/`&&`/`||` condition, and a subshell there inherits the suppression even if it re-enables
+  `set -euo pipefail`, so `( set -e; f; printf … )` used as a condition keeps running after `f`
+  fails and reports success. Helpers whose status is tested must write `f || exit 1`.
 - `$WORKLOAD_FILE` is a read-only template. Every phase gets its own file from
   `workload::generate <phase> <iteration>` (`lib/workload.sh`) written to `$WORKLOAD_DIR`
   (= `$EXPERIMENT_DIR/workloads`); the engine keeps the current one in `$WORKLOAD_PHASE`.
@@ -213,9 +243,10 @@ carry-overs to remember while doing it.
    backends we cannot run here would ship unverified deletions.
 3. **Local runs must pass `DB_PWD=USyd2025`**; the hardcoded `usyd2026` does not match this
    machine's server.
-4. `experiment_postgresql_array_baseline.sh` is broken on PG 18 (`buffers_backend` removed
-   from `pg_stat_bgwriter`) and excluded from the mock suite — replaced by `--mode baseline`
-   in step 6.
+4. The legacy PG array baseline was already broken on PG 18 (`buffers_backend` removed from
+   `pg_stat_bgwriter`). It is deleted with the rest of the `*_baseline.sh` family; `--mode
+   baseline` collects the PG18 statistics set like every other PostgreSQL backend, so baseline
+   and mainline rows stay comparable.
 5. **array_json = schema only.** Its full-visibility observability is discarded, not
    deferred (plan §4): no instrumentation layer, no `instrument::*` contract, no engine hook
    points, and nothing may pass `jdbc.readsample.*` / `jdbc.slowread.*` to a binding. Do not
@@ -238,7 +269,13 @@ carry-overs to remember while doing it.
 - **Credential leak:** YCSB echoes `-p db.passwd=…` into the results log via its
   `Command line:` banner. The smoke suite masks it; a real fix (env/`PGPASSWORD` or redact
   at capture) changes log contents — needs a decision.
-- EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.
+- EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it. (Step 6's
+  `--mode baseline` is verified locally only; an EC2 baseline run would be the first evidence for
+  the deleted legacy baselines' replacement.)
+- **`tests/test_logging.sh` is not a test.** It is a 350-line pre-refactor experiment runner (with
+  `DB_PWD="usyd2026"` hardcoded) that sits in `tests/`, is executed by nothing, and passes the
+  shellcheck ratchet only by accident of its age. Delete it at step 7 (which touches the test tree
+  anyway), or say why it stays?
 
 ## Log
 
@@ -314,7 +351,44 @@ carry-overs to remember while doing it.
   not own, are partly client-side (`jdbc.readsample.*` exists only in the forked
   `jdbc-array-json` client), and their engine had drifted from the authoritative spec.
 
+### 2026-09-24 — step 6: `--mode baseline`, one set of phase steps, nine legacy runners deleted
+
+- **The engine was split before the second mode was added.** `run_experiment()` is a dispatcher on
+  `EXPERIMENT_MODE`; its former 300-line body became named phase steps, and both engines are now
+  sequences over them. That order matters: the split could be proven behaviour-preserving against
+  the goldens (it is — `smoke_authoritative.sh` PASS with unchanged goldens), a copy of the loop for
+  baseline never could.
+- `lib/lifecycle_baseline.sh`: bootstrap(false, `$DB_NAME`) → load → (extend → vacuum → measure)
+  × epochs×steps. It never mentions YCSB, metrics or the CSV — enforced by the unit test
+  `baseline_engine_reuses_the_steps`, so a future edit cannot quietly fork the loop body again
+  (that fork is exactly what the nine deleted scripts each were).
+- Mode semantics worth remembering: artefact names gain `_baseline` (`MODE_SUFFIX` in
+  `config::derive_paths`) so a baseline run cannot overwrite the mainline run it is compared with;
+  `COMPARISON_INTERVAL` is forced to 0 rather than ignored; preflight runs without pg_dump because
+  nothing is dumped; `$UNCHANGED_DB_NAME`/`$BACKUP_DB_NAME` are validated but never created —
+  asserted by the smoke for PostgreSQL.
+- **Deleted** `experiment_{couchbase,mariadb_innodb,mariadb_rocksdb,mongodb,neo4j,postgresql,
+  postgresql_array,postgresql_array_json,sample}_baseline.sh` (nine; the plan said eight — it had
+  not counted the sample pair). Their bodies are discarded per §0. Before deleting, their CSV
+  headers were captured into `tests/golden/legacy_csv_columns.txt`: three backends (couchbase,
+  mariadb_innodb, mongodb) had a column-comparability test that grepped those scripts, and without
+  the capture step 6 would have silently weakened the very guarantee the refactor exists to keep.
+- `tools/check_scripts.sh`'s legacy list drops from 11 files to 2 (`experiment_postgresql_array_json.sh`,
+  `experiment_sample.sh`); `README.md`, `ycsb-ec2-bundle/README.md` and `BUNDLE_README.md` had
+  commands naming deleted scripts and got one-line fixes now (full rewrite stays step 7).
+- Suite after the change: static checks PASS · **63** shell + 7 python tests OK · authoritative
+  smoke PASS vs unchanged goldens · baseline smoke PASS (postgresql_textarray 74 columns, mongodb
+  22, mariadb_innodb 132 — each identical to that backend's mainline header) · all eight mainline
+  backend smokes PASS.
+- **Bash gotcha found while writing the mode test** (cost an hour, worth knowing in this codebase):
+  `set -e` is suppressed inside the condition of `if`/`&&`/`||`, and a subshell started there
+  inherits the suppression *even when it runs its own `set -euo pipefail`*. So in
+  `( set -e; f; printf … )`, a failing `f` does not abort — the subshell prints and exits 0. In a
+  test helper whose result is used as a condition, write `f || exit 1`.
+
 ### Next checkpoint
 
-Step 6: `--mode baseline` (`lib/lifecycle_baseline.sh`, then delete the eight legacy
-`*_baseline.sh`). Step 5 is complete; the array_json shim is settled (held for 8c).
+Step 7: `tools/bundle.sh` (single-file bundle), `tools/deploy.sh`, README rewrite (§Deploy / Clean
+EC2 Run / Launcher / Verify / Output Layout — and the `--mode baseline` flag, still undocumented),
+`.gitignore` for `.DS_Store`/`__pycache__`, remove the committed `.pyc`. Then 8c, EC2-gated. Steps
+5 and 6 are complete; the array_json shim is settled (held for 8c).

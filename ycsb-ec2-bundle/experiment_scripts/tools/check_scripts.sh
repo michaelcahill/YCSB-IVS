@@ -18,17 +18,8 @@ SHELLCHECK_EXCLUDE=SC1091,SC2016,SC2029,SC2064,SC2034,SC2154
 # leaves it when it is ported (step 5), replaced by a shim, or deleted (step 8c). Nothing new
 # may be added - files not listed here must be shellcheck-clean.
 LEGACY_WITH_WARNINGS=(
-    ./experiment_couchbase_baseline.sh
-    ./experiment_mariadb_innodb_baseline.sh
-    ./experiment_mariadb_rocksdb_baseline.sh
-    ./experiment_mongodb_baseline.sh
-    ./experiment_neo4j_baseline.sh
     ./experiment_postgresql_array_json.sh
-    ./experiment_postgresql_array_json_baseline.sh
-    ./experiment_postgresql_array_baseline.sh
-    ./experiment_postgresql_baseline.sh
     ./experiment_sample.sh
-    ./experiment_sample_baseline.sh
 )
 
 is_legacy() {

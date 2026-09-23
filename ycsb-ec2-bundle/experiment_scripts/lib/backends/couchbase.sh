@@ -36,8 +36,9 @@
 #     benchmark role may not create them, set it to 0 and create three buckets plus three
 #     bucket-named users beforehand - see conf/db.couchbase.env.example.
 #
-# The 22 statistics columns are the legacy list in the legacy order (asserted against
-# experiment_couchbase_baseline.sh by tests/test_config_workload.sh), and they are all zero:
+# The 22 statistics columns are the legacy list in the legacy order (the header of
+# experiment_couchbase_baseline.sh, kept as data in tests/golden/legacy_csv_columns.txt and
+# asserted by tests/test_config_workload.sh), and they are all zero:
 # Couchbase exposes no equivalent of those PostgreSQL counters, and the legacy runner emitted
 # literal zeros for them too. Keeping the names keeps this backend's results CSV comparable with
 # the EC2 runs made before the refactor; what a phase really did is in the value-size files and,

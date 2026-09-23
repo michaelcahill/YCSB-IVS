@@ -142,6 +142,38 @@ check_alias_canonical_wins() {
 }
 check_alias_canonical_wins >/dev/null 2>&1 && ok || bad "the canonical name must win over the legacy one (rc=$?)"
 
+# --- experiment mode ----------------------------------------------------------
+
+# There are two engines (lib/lifecycle.sh, lib/lifecycle_baseline.sh) and they share every phase
+# step. What the mode may change in the configuration layer is therefore exactly three things:
+# which engine runs, that a baseline run cannot overwrite the mainline artefacts it is compared
+# with, and that comparison phases are off rather than silently skipped.
+mode_config() {   # <mode> -> "<EXPERIMENT_NAME>|<COMPARISON_INTERVAL>"
+    local mode="$1"
+    (
+        set -euo pipefail
+        backend::default_config() { :; }      # the backend's own defaults are not under test here
+        registry::info() { printf '\n'; }
+        TYPE=t SCALE=light RUN=2 EXTEND_DIST=d WORKLOAD=w
+        EXPERIMENT_MODE="$mode"
+        COMPARISON_INTERVAL=1                 # a caller asking for comparisons is overruled
+        # Explicit || exit, not bare calls: bash suppresses errexit inside the condition of an
+        # if/&& (and a subshell inherits that suppression), so `config::init_defaults` alone
+        # would run on to the printf below when this helper is used as a condition.
+        config::init_defaults || exit 1
+        config::derive_paths || exit 1
+        printf '%s|%s\n' "$EXPERIMENT_NAME" "$COMPARISON_INTERVAL"
+    )
+}
+eq "mainline artefact names carry no mode suffix" "$(mode_config mainline)" "t_light_extend-d_w_run2|1"
+eq "baseline artefacts get their own names" "$(mode_config baseline)" "t_light_extend-d_w_run2_baseline|0"
+eq "an explicit name override still wins" "$(EXPERIMENT_NAME_OVERRIDE=custom mode_config baseline)" "custom|0"
+if mode_config bogus >/dev/null 2>&1; then
+    bad "an unknown mode must be rejected"
+else
+    ok
+fi
+
 # --- workload generation ------------------------------------------------------
 
 sandbox "$TMP/wl" || exit 1
@@ -290,47 +322,54 @@ for backend in $(registry::available); do
 done
 
 # Statistics columns are a backend's results-CSV schema, and the whole point of keeping them is
-# comparability with the runs made before the refactor. Where a legacy script for a ported
-# backend still exists in the tree, its header is the specification.
-legacy_csv_columns() {   # <file> -> the statistics columns of that runner's results CSV
-    local file="$1" header
-    header=$(grep -m1 -E '^\s*(base_)?header="Epoch,Phase,' "$file") || return 1
-    header=${header#*Operation,}
-    header=${header%%,Readprop*}
-    header=${header#CPU,Memory,}
-    [[ "$header" == CPU,Memory ]] && header=''
-    printf '%s\n' "$header"
-}
+# comparability with the runs made before the refactor, so the legacy headers are the
+# specification. They are kept here as data (tests/golden/legacy_csv_columns.txt) because the
+# scripts they were read from are gone: step 6 deleted the nine legacy *_baseline.sh runners
+# once --mode baseline replaced them. Backends whose legacy header did not survive parsing, or
+# whose statistics set was deliberately redesigned with the port (postgresql_*: PG18 views;
+# mariadb_rocksdb: information_schema instead of greps that matched nothing; neo4j) are listed
+# in that file's history rather than asserted here.
 legacy_header_matches() {
-    local backend file names legacy
-    while read -r backend file; do
-        [[ -n "$backend" && -r "$SCRIPTS_DIR/$file" ]] || continue   # deleted with the legacy script
+    local backend names legacy
+    while IFS=$'\t' read -r backend legacy; do
+        [[ -n "$backend" && ! "$backend" == \#* ]] || continue
         names=$(cd "$SCRIPTS_DIR" && source "lib/backends/$backend.sh" && backend::metric_names | paste -sd, -)
-        legacy=$(cd "$SCRIPTS_DIR" && legacy_csv_columns "$file")
         if [[ "$names" != "$legacy" ]]; then
             echo "backend $backend changed its statistics columns" >&2
             echo "  new   : $names" >&2
             echo "  legacy: $legacy" >&2
             return 1
         fi
-    done <<'PAIRS'
-couchbase experiment_couchbase_baseline.sh
-mariadb_innodb experiment_mariadb_innodb_baseline.sh
-mongodb experiment_mongodb_baseline.sh
-PAIRS
+    done < "$SCRIPTS_DIR/tests/golden/legacy_csv_columns.txt"
 }
 (cd "$SCRIPTS_DIR" && legacy_header_matches) && ok || bad "statistics columns still match the legacy headers (rc=$?)"
 
-# The engine must stay backend-independent: no PostgreSQL spellings, and no writes to
+# The engines must stay backend-independent: no PostgreSQL spellings, and no writes to
 # workload files (the two things that made the legacy scripts unmaintainable).
 engine_hygiene() {
-    local file="lib/lifecycle.sh" hits
-    hits=$(grep -nE '\b(pg_exec|pg_cli|collect_postgres_metrics|postgres_preflight|initialize_database|close_db|wait_for_idle_postgres|restore_comparison_database)\b' "$file") || true
-    [[ -z "$hits" ]] || { echo "engine calls backend internals: $hits" >&2; return 1; }
-    hits=$(grep -nE 'perl -i|>[[:space:]]*"?\$\{?WORKLOAD_FILE' "$file") || true
-    [[ -z "$hits" ]] || { echo "engine writes to a workload file: $hits" >&2; return 1; }
+    local file hits
+    for file in lib/lifecycle.sh lib/lifecycle_baseline.sh; do
+        hits=$(grep -nE '\b(pg_exec|pg_cli|collect_postgres_metrics|postgres_preflight|initialize_database|close_db|wait_for_idle_postgres|restore_comparison_database)\b' "$file") || true
+        [[ -z "$hits" ]] || { echo "engine calls backend internals: $hits" >&2; return 1; }
+        hits=$(grep -nE 'perl -i|>[[:space:]]*"?\$\{?WORKLOAD_FILE' "$file") || true
+        [[ -z "$hits" ]] || { echo "engine writes to a workload file: $hits" >&2; return 1; }
+    done
 }
 (cd "$SCRIPTS_DIR" && engine_hygiene) && ok || bad "engine hygiene (rc=$?)"
+
+# A mode is a sequence of shared steps, never a second copy of them: the baseline engine may not
+# invoke YCSB, sample metrics or write a result row itself. That is what keeps its numbers
+# comparable with the mainline ones, and it is the duplication that the nine legacy
+# *_baseline.sh scripts each carried.
+baseline_engine_reuses_the_steps() {
+    local hits
+    hits=$(grep -nE 'run_with_metrics|run_ycsb|write_result|\$YCSB|collect_metrics|workload::generate|backend::' \
+        lib/lifecycle_baseline.sh | grep -vE '^[0-9]+:[[:space:]]*#') || true
+    [[ -z "$hits" ]] || { echo "baseline engine re-implements a step: $hits" >&2; return 1; }
+    grep -q 'run_experiment_baseline' lib/lifecycle.sh \
+        || { echo "run_experiment does not dispatch to the baseline engine" >&2; return 1; }
+}
+(cd "$SCRIPTS_DIR" && baseline_engine_reuses_the_steps) && ok || bad "baseline mode reuses the phase steps (rc=$?)"
 
 # The core must stay database-independent: no PostgreSQL column names outside the
 # PostgreSQL module, or a MongoDB/MariaDB results CSV would inherit them.

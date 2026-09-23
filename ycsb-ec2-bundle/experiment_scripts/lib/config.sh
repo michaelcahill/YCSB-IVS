@@ -212,6 +212,26 @@ config::init_defaults() {
     STEPS_PER_EPOCH="${STEPS_PER_EPOCH:-10}"
     COMPARISON_INTERVAL="${COMPARISON_INTERVAL:-1}"   # 0 disables clean-run/avg-run
 
+    # --- experiment mode -------------------------------------------------------
+    # mainline: the full phase sequence, including both comparison databases.
+    # baseline: load -> [extend -> measure] only (lib/lifecycle_baseline.sh).
+    EXPERIMENT_MODE="${EXPERIMENT_MODE:-mainline}"
+    case "$EXPERIMENT_MODE" in
+        mainline) MODE_SUFFIX="" ;;
+        baseline)
+            # Artefacts of a baseline run must never overwrite the mainline run they are
+            # compared with, so the mode is part of every generated name.
+            MODE_SUFFIX="_baseline"
+            # Not merely unused: a baseline run has nothing to compare against, and an
+            # interval left at 1 would suggest phases that were silently skipped.
+            COMPARISON_INTERVAL=0
+            ;;
+        *)
+            echo "[error] unknown experiment mode: $EXPERIMENT_MODE (expected mainline or baseline)" >&2
+            return 2
+            ;;
+    esac
+
     # --- VACUUM ----------------------------------------------------------------
     VACUUM_ENABLED="${VACUUM_ENABLED:-0}"
     vacuum="$VACUUM_ENABLED"                    # legacy name still used by the engine
@@ -257,7 +277,7 @@ config::init_defaults() {
 # layers (defaults, backend, --config, environment, CLI) so that overriding TYPE,
 # SCALE or RUN renames every artefact consistently.
 config::derive_paths() {
-    EXPERIMENT_NAME="${EXPERIMENT_NAME_OVERRIDE:-${TYPE}_${SCALE}_extend-${EXTEND_DIST}_${WORKLOAD}_run${RUN}}"
+    EXPERIMENT_NAME="${EXPERIMENT_NAME_OVERRIDE:-${TYPE}_${SCALE}_extend-${EXTEND_DIST}_${WORKLOAD}_run${RUN}${MODE_SUFFIX:-}}"
 
     # Define input and output filenames
     WORKLOAD_FILE="${WORKLOAD_FILE:-../workloads/$(registry::info default_workload)}"

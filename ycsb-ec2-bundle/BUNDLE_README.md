@@ -62,14 +62,19 @@ mkdir -p analysis/Data/Baseline_data analysis/Data/Value_size_data analysis/Data
 2. **Run an experiment** (from the bundle root, i.e., the directory containing this README):
    ```bash
    cd experiment_scripts
-   ./experiment_postgresql_baseline.sh
+   ./experiment.sh postgresql_row            # full phase sequence
+   ./experiment.sh postgresql_row --mode baseline   # fixed value sizes, no comparison phases
    ```
 
    Equivalently, from the parent directory of the bundle:
    ```bash
    cd ycsb-ec2-bundle/experiment_scripts
-   ./experiment_postgresql_baseline.sh
+   ./experiment.sh postgresql_row
    ```
+
+   (The one `experiment_<backend>.sh` per backend is a compatibility shim for this single
+   runner; it disappears with REFACTOR_PLAN.md step 8c. This whole file is rewritten in
+   step 7.)
 
    The scripts `cd` into their own directory at startup, so they also work when invoked
    with a full path from anywhere.

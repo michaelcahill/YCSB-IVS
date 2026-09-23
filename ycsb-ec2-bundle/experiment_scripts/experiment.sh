@@ -8,12 +8,14 @@
 #   ./experiment.sh postgresql_textarray --epochs 2 --steps 2
 #   ./experiment.sh postgresql_textarray --config conf/experiments/smoke.env
 #   ./experiment.sh postgresql_textarray --var SCALE=light --var RUN=3
+#   ./experiment.sh postgresql_textarray --mode baseline    # no reference/comparison phases
 #   ./experiment.sh --list-backends
 #   ./experiment.sh postgresql_textarray --dry-run
 #
 # The backend supplies connection/schema behaviour; lib/lifecycle.sh supplies the
-# phase engine shared by every backend. Configuration precedence: built-in defaults,
-# backend defaults, --config file, environment, then CLI flags.
+# phase steps shared by every backend and both modes, and lib/lifecycle_baseline.sh is the
+# second (shorter) sequence of them. Configuration precedence: built-in defaults, backend
+# defaults, --config file, environment, then CLI flags.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,6 +45,8 @@ source "$LIB_DIR/keysizes.sh"
 source "$LIB_DIR/workload.sh"
 # shellcheck source=lib/lifecycle.sh
 source "$LIB_DIR/lifecycle.sh"
+# shellcheck source=lib/lifecycle_baseline.sh
+source "$LIB_DIR/lifecycle_baseline.sh"
 
 usage() {
     cat <<USAGE
@@ -61,6 +65,10 @@ Options:
   --run-id ID         run counter, used in artefact names
   --type NAME         experiment type, prefix of every artefact name
   --scale NAME        scale mode (heavy|light), selects conf/scale.<NAME>.env
+  --mode NAME         phase sequence: mainline (default) or baseline. A baseline run is
+                      load -> [extend -> measure] repeated, without the reference database
+                      and the comparison (clean-run / comparison-load / avg-run) phases; its
+                      artefact names gain a _baseline suffix.
   --workload FILE     read-only workload template (never modified)
   --experiment-dir D  root for logs, data and generated workloads
   --dry-run           resolve configuration, print it, do not benchmark
@@ -106,9 +114,10 @@ while (($#)); do
         --workload) config::set_cli "WORKLOAD_FILE=${2:?--workload needs a file}"; shift 2 ;;
         --experiment-dir) config::set_cli "EXPERIMENT_DIR=${2:?--experiment-dir needs a directory}"; shift 2 ;;
         --mode)
-            # Baseline mode lands with REFACTOR_PLAN.md step 6.
-            [[ "${2:-mainline}" == mainline ]] || { echo "[error] --mode ${2} is not implemented yet" >&2; exit 2; }
-            shift 2 ;;
+            case "${2:-}" in
+                mainline | baseline) config::set_cli "EXPERIMENT_MODE=$2"; shift 2 ;;
+                *) echo "[error] --mode must be mainline or baseline, got: ${2:-<empty>}" >&2; exit 2 ;;
+            esac ;;
         --dry-run) DRY_RUN=1; shift ;;
         --check) CHECK_ONLY=1; shift ;;
         -*) echo "[error] unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -152,8 +161,11 @@ config::derive_paths
 if (( CHECK_ONLY )); then
     # Exactly the checks run_experiment performs before it touches anything: this is how a
     # test suite or an operator asks "is a server reachable for this backend?" without
-    # running a benchmark. The probe databases it creates are dropped again.
-    if backend::preflight true "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"; then
+    # running a benchmark. The probe databases it creates are dropped again. A baseline run
+    # never dumps a database, so pg_dump is not part of its preflight either.
+    needs_dump=true
+    if [[ "$EXPERIMENT_MODE" == baseline ]]; then needs_dump=false; fi
+    if backend::preflight "$needs_dump" "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"; then
         echo "[check] $ACTIVE_BACKEND preflight passed"
         exit 0
     fi
@@ -162,17 +174,25 @@ if (( CHECK_ONLY )); then
 fi
 
 if (( DRY_RUN )); then
+    mode_note=""
+    databases_note=" (reference: $UNCHANGED_DB_NAME, comparison: $BACKUP_DB_NAME)"
+    if [[ "$EXPERIMENT_MODE" == baseline ]]; then
+        mode_note=" — no reference and no comparison phases"
+        databases_note=" (baseline mode creates no reference/comparison database)"
+    fi
     cat <<DRYRUN
 backend:          $ACTIVE_BACKEND ($(registry::info display_name))
+mode:             $EXPERIMENT_MODE$mode_note
 config files:     ${CONFIG_SOURCES[*]:-<none>}
 binding:          $YCSB_BINDING
-databases:        $DB_NAME (reference: $UNCHANGED_DB_NAME, comparison: $BACKUP_DB_NAME)
+databases:        $DB_NAME$databases_note
 endpoint:         $DB_HOST:$DB_PORT user=$DB_USERNAME
 workload file:    $WORKLOAD_FILE (sha256 $(workload::hash "$WORKLOAD_FILE" 2>/dev/null))
 workload dir:     $WORKLOAD_DIR
 experiment dir:   $EXPERIMENT_DIR
 results CSV:      $OUTPUT_FILE
 epochs x steps:   ${NUM_EPOCHS} x ${STEPS_PER_EPOCH} (comparison every ${COMPARISON_INTERVAL})
+phases:           $(experiment::describe_phases)
 vacuum:           $VACUUM_ENABLED
 DRYRUN
     exit 0
