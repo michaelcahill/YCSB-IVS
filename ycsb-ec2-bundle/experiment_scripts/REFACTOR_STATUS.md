@@ -96,7 +96,8 @@ Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked · ➖ cancell
 **The refactor is finished — steps 0–8c are all complete.** `experiment.sh <backend>` is the
 only entry point; no legacy script, shim or alias survives (they exist only in the
 `pre-refactor-scripts` tag). Work that remains is *outside* the plan and listed per item below;
-the **Open questions** section needs user decisions before any of it starts.
+the **Open questions** section is empty — every one was answered on 2026-09-24 and folded
+into "Decisions and deviations still in force".
 
 - **Step 8c (done, 2026-09-24).** Deleted: the nine `experiment_<backend>.sh` compatibility
   shims, `experiment_postgresql_array_json.sh`, `run_postgresql_array_json_full_visibility.sh`,
@@ -254,8 +255,8 @@ the **Open questions** section needs user decisions before any of it starts.
    Timings, throughput, latencies, PG counters, OIDs, execution ids, timestamps and
    credentials are masked; phase markers, log shapes, CSV column names, row/operation shape
    compared exactly. Suite is deterministic on this machine.
-2. **Legacy scripts become one-line `exec` shims and stay until step 8c** — deleting
-   backends we cannot run here would ship unverified deletions.
+2. ~~Legacy scripts become one-line `exec` shims and stay until step 8c.~~ **Closed at 8c:**
+   every shim and legacy script is deleted; the escape hatch is the `pre-refactor-scripts` tag.
 3. **Local runs must pass `DB_PWD=USyd2025`**; the hardcoded `usyd2026` does not match this
    machine's server.
 4. The legacy PG array baseline was already broken on PG 18 (`buffers_backend` removed from
@@ -266,24 +267,33 @@ the **Open questions** section needs user decisions before any of it starts.
    deferred (plan §4): no instrumentation layer, no `instrument::*` contract, no engine hook
    points, and nothing may pass `jdbc.readsample.*` / `jdbc.slowread.*` to a binding. Do not
    re-open this by "temporarily" copying sampler code into core or a backend.
+6. **`log()` logs everything** (user decision 2026-09-24, "widen"). The pre-refactor
+   message-shape allow-list is gone — every `log()` call reaches the run log; verbosity is
+   controlled at the call site, never by a filter future callers must know about. Goldens were
+   re-captured for exactly this (+139 lines of verification rows, phase banners and
+   backend-operation traces).
+7. **couchbase's 22 / neo4j's 19 zero-valued statistics columns stay** (user decision
+   2026-09-24). They exist for CSV comparability with the legacy headers; real counters go to
+   the run log. Do not "fix" them into real counters — that changes the CSV schema and would
+   require re-validating `../analysis_scripts/`.
+8. **The YCSB `db.passwd=` echo in run logs is accepted** (user decision 2026-09-24). YCSB
+   prints its `Command line:` banner, which includes the connection password; smoke goldens
+   mask it at capture, real logs are not redacted. Treat run logs under `analysis/` as
+   credential-bearing: do not commit them or paste them into tickets.
 
 ## Open questions for the user
 
+**None.** All were answered on 2026-09-24; the outcomes are folded into "Decisions and
+deviations still in force" items 6–8:
 
-- **`log()` allow-list drops real progress lines.** `lib/common.sh` echoes only recognised
-  message shapes, so e.g. `Initial-load verification - TotalSize:…`, `Extend verification - …`,
-  `Workload file fieldlength set to:…` and the `=== …phase ===` banners never reach the run
-  log (pre-existing, also on `master`). Widening the list adds lines to every future log and
-  needs the goldens re-captured — do it, or keep the current log shape?
-- **Couchbase's 22 statistics columns are literal zeros** (kept from the legacy runner for
-  CSV comparability; real bucket counters go to the run log), same for neo4j's mostly-zero
-  19 columns. Keep as-is, or replace with real counters — which changes that backend's CSV
-  schema and needs the `../analysis_scripts/` checked. Decide once, for both.
-- Should `conf/db.postgresql.env` be committed as a template (`conf/db.postgresql.env.example`)
-  with real credentials kept out of git? (Plan says credentials stay out of tracked files.)
-- **Credential leak:** YCSB echoes `-p db.passwd=…` into the results log via its
-  `Command line:` banner. The smoke suite masks it; a real fix (env/`PGPASSWORD` or redact
-  at capture) changes log contents — needs a decision.
+- ~~`log()` allow-list drops real progress lines.~~ **Resolved: widened** — `log()` now logs
+  every call, goldens re-captured (see Log below).
+- ~~Couchbase/neo4j zero statistics columns.~~ **Resolved: keep as-is** — CSV comparability
+  wins; real counters stay in the run log; `../analysis_scripts/` needs no check.
+- ~~Commit `conf/db.postgresql.env.example`?~~ **Resolved: already done** — every backend has
+  a tracked `.example`, credentials live only in gitignored `conf/db.<backend>.env`.
+- ~~Credential leak via YCSB's `Command line:` banner.~~ **Resolved: accepted** — goldens mask
+  it; real run logs are treated as credential-bearing (decision 8).
 - ~~EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.~~
   **Resolved 2026-09-24: the user ran it and confirmed everything works as expected — step 8c
   shipped on that confirmation.** If the EC2 baseline evidence (first `--mode baseline` run) has
@@ -293,6 +303,23 @@ the **Open questions** section needs user decisions before any of it starts.
   recoverable from git if anyone disputes the call.
 
 ## Log
+
+### 2026-09-24 — open questions all answered; `log()` widened, goldens re-captured
+
+- User decisions: **widen** the log filter · **keep** couchbase/neo4j zero columns ·
+  conf-example question closed as already-done · **accept** the YCSB `db.passwd` echo ·
+  **leave** the branch unmerged. Recorded as decisions 6–8; the Open questions section is now
+  empty.
+- `lib/common.sh::log()` lost its message-shape allow-list: every call prints with the
+  `[epoch run phase]` prefix. The filter was a pre-refactor habit that silently dropped real
+  progress (`Initial-load verification - TotalSize:…`, workload-fieldlength lines, the
+  `=== …phase ===` banners); with it gone, a new `log()` call can never be swallowed.
+- Goldens re-captured (`smoke_authoritative.sh --update`): +139 lines each in run.out and
+  results.markers — verification rows, phase banners, backend-operation START/END traces,
+  CSV-write markers. Secret scan of the new goldens: only `db.passwd=<REDACTED>` (capture-time
+  masking works). Re-run PASS (deterministic), then full `REQUIRE_DB=1` suite green:
+  static checks · 58 + 19 shell tests · 7 python · authoritative goldens · baseline smoke ·
+  bundle run · **all nine** backend smokes.
 
 ### 2026-09-24 — step 8c: legacy scripts, shims and aliases deleted → refactor complete
 
@@ -485,11 +512,8 @@ the **Open questions** section needs user decisions before any of it starts.
 **No plan item is open.** Everything left is outside REFACTOR_PLAN and awaits user decisions or
 follow-up work:
 
-- The **Open questions** above (log() allow-list, couchbase/neo4j zero columns,
-  `conf/db.postgresql.env.example` — note examples for all backends already exist and are
-  tracked — and the YCSB `db.passwd` echo into run logs).
-- Known open work recorded in "Where to resume": porting `watcher.sh`'s sampler away from
+- Known open work (outside the plan, not scheduled): porting `watcher.sh`'s sampler away from
   `sudo -u postgres` (remote servers), and the optional Java-side removal of the now-dead
   `jdbc.readsample.*`/`jdbc.slowread.*` sampling in `jdbc-array-json`.
-- Committing this step-8c change set and, if the branch should land, merging
-  `refactor/experiment-scripts` per the user's preference.
+- Branch handling: user decided (2026-09-24) to **leave `refactor/experiment-scripts` as-is**
+  — no merge to `master` for now.

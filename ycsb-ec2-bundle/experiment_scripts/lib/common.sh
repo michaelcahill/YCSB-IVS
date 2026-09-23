@@ -2,27 +2,17 @@
 # Part of the experiment runner; sourced, never executed directly.
 
 # Logging, run lifecycle and signal-safe cleanup shared by every experiment run.
-# stderr keeps diagnostics out of captured SQL results and raw YCSB CSV: only
-# recognised progress/error lines are echoed, everything else is dropped.
+# stderr keeps diagnostics out of captured SQL results and raw YCSB CSV.
+#
+# Every log() call is echoed. The pre-refactor runner filtered messages through an
+# allow-list of shapes, which silently dropped legitimate progress lines (e.g.
+# "Initial-load verification - TotalSize:…", "Workload file fieldlength set to:…",
+# the "=== …phase ===" banners); a decision on 2026-09-24 widened it to log
+# everything. Verbosity is therefore controlled at the call site, never by a message
+# filter that future callers must know about.
 log() {
-    case "$*" in
-        "START experiment "*|"END experiment "*|\
-        "START preflight"|"END preflight"|\
-        "START statistics"*|"END statistics"*|"DB statistics"*|\
-        "START YCSB "*|"END YCSB "*|\
-        "START VACUUM"*|"END VACUUM"*|\
-        "START WAIT"*|"END WAIT"*|"TIMEOUT WAIT"*|"WAITING"*|\
-        "Initializing PostgreSQL database "*|"Done initializing "*|\
-        "Backing up the database started"|"Backing up the database finished"|\
-        "Log file: "*|"Result CSV: "*|"Download this log from EC2: "*|\
-        *ERROR*|*WARNING*|Warning:*)
-            printf '[epoch=%s run=%s phase=%s] %s\n' \
-                "${epoch:-0}" "${step:-0}" "${phase:-setup}" "$*" >&2
-            ;;
-        *)
-            return 0
-            ;;
-    esac
+    printf '[epoch=%s run=%s phase=%s] %s\n' \
+        "${epoch:-0}" "${step:-0}" "${phase:-setup}" "$*" >&2
 }
 
 start_logging() {
