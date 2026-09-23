@@ -5,15 +5,13 @@ This bundle contains all necessary files and directories to run YCSB-IVS experim
 ## Contents
 
 ### Experiment Scripts
-- **experiment_scripts/**: Contains all experiment bash scripts for running workloads
-  - PostgreSQL experiments (baseline and extended)
-  - PostgreSQL array/JSONB-column experiments (`experiment_postgresql_array*.sh`)
-  - PostgreNoSQL JSONB document-store experiment (`experiment_postgrenosql.sh`)
-  - Neo4j experiments (baseline and extended)
-  - Couchbase experiments (baseline and extended)
-  - MongoDB experiments (baseline and extended)
-  - MariaDB experiments (InnoDB and RocksDB, baseline and extended)
-  - Sample experiments
+- **experiment_scripts/**: The experiment harness. One runner —
+  `./experiment.sh <backend> [options]` — with one module per backend in
+  `lib/backends/`, shared engine code in `lib/`, parsed configuration in `conf/`,
+  deployment tooling in `tools/` (`deploy.sh`, `bundle.sh`) and the test suite in
+  `tests/`. Backends: PostgreSQL (text-array, jsonb-array, row, PostgreNoSQL),
+  MariaDB (InnoDB, RocksDB), MongoDB, Neo4j, Couchbase; two phase sequences
+  (`mainline` and `--mode baseline`). See `experiment_scripts/README.md` for the runbook.
 
 ### Core YCSB Components
 - **bin/**: YCSB execution scripts (`ycsb.sh`) and bindings configuration
@@ -73,36 +71,30 @@ mkdir -p analysis/Data/Baseline_data analysis/Data/Value_size_data analysis/Data
    ```
 
    (The one `experiment_<backend>.sh` per backend is a compatibility shim for this single
-   runner; it disappears with REFACTOR_PLAN.md step 8c. This whole file is rewritten in
-   step 7.)
+   runner; it disappears with REFACTOR_PLAN.md step 8c.)
 
-   The scripts `cd` into their own directory at startup, so they also work when invoked
-   with a full path from anywhere.
-
-   The PostgreNoSQL document-store experiment works the same way:
-   ```bash
-   cd experiment_scripts
-   ./experiment_postgrenosql.sh
-   ```
-
-   It creates the JSONB document schema (`YCSB_KEY` + `YCSB_VALUE JSONB`) automatically and runs
-   YCSB with the `postgrenosql` binding. Value sizes are measured as the serialized JSONB document
-   size (`octet_length(ycsb_value::text)`), which includes per-field key/quote overhead.
+   The runner `cd`s into its own directory at startup, so it also works when invoked with
+   a full path from anywhere. Every backend — including the PostgreNoSQL document store
+   (`./experiment.sh postgrenosql`, schema `YCSB_KEY` + `YCSB_VALUE JSONB`) — is selected
+   by name; schemas are created automatically, and connection parameters come from
+   `experiment_scripts/conf/db.<backend>.env` (copy the `.example`; never hardcode
+   credentials in scripts).
 
 3. **View results**:
-   Results will be written to `analysis/Data/` subdirectories as configured in each script.
+   Each run writes to its own directory under `analysis/experiments/ycsb_<name>/`
+   (`data/workload_data/<name>.csv` is the analysis input). See
+   `experiment_scripts/README.md` §Output Layout.
 
 ## Notes
 
-- The scripts resolve their own location at startup (`cd "$SCRIPT_DIR"`), so relative paths
+- The runner resolves its own location at startup (`cd "$SCRIPT_DIR"`), so relative paths
   like `../bin/ycsb.sh` and `../workloads/workloada-extend` work regardless of the invocation directory
-- `experiment_postgrenosql.sh` is a variant of `experiment_postgresql.sh` for the `postgrenosql`
-  binding: same experiment flow (extend/run/reference/clean-run/avg-run phases, metrics, key-size
-  tracking), but with the JSONB document schema instead of one column per field. Note that the
-  extend phase requires an `extend()` implementation in the binding; without it, all EXTEND
-  operations fail and the script aborts after the extend phase.
-- Ensure database servers are running and configured before executing experiments
-- Database connection parameters should be updated in each script before execution
+- Workload files under `workloads/` are read-only templates; every run generates its own
+  immutable copies under the experiment directory's `workloads/`
+- Ensure database servers are running and configured before executing experiments;
+  `./experiment.sh <backend> --check` verifies one backend without benchmarking
+- Database connection parameters live in `experiment_scripts/conf/db.<backend>.env`
+  (gitignored, parsed not executed); run `tools/deploy.sh` to ship the harness to an EC2 host
 
 ## Requirements
 

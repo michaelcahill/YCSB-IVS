@@ -12,10 +12,11 @@ Authoritative specification: `experiment_postgresql_array-text-autovacuum.sh`.
 > phase loop, watcher and CSV pipeline as the other PostgreSQL backends. That work moved
 > from step 8 into **step 5 tail (b)**; steps 8a/8b are gone.
 
-**Status: steps 0–6 complete** — nine backends verified end-to-end (`postgresql_textarray`,
+**Status: steps 0–7 complete** — nine backends verified end-to-end (`postgresql_textarray`,
 `postgresql_row`, `postgresql_json`, `postgrenosql`, `mariadb_innodb`, `mariadb_rocksdb`,
 `mongodb`, `neo4j`, `couchbase`) and two phase sequences (`mainline`, `--mode baseline`) on one
-set of phase steps. Of step 5 only the array_json shim remains, **held for 8c**.
+set of phase steps; step 7 shipped `tools/bundle.sh`, `tools/deploy.sh` and the rewritten
+runbook. Of step 5 only the array_json shim remains, **held for 8c**.
 This file now carries only what the **remaining work** (§8) needs — the original
 duplication analysis, migration rows for completed steps, and the §10 bug list (all fixed
 in step 0) were trimmed; full detail lives in git history (`git log -- REFACTOR_PLAN.md`).
@@ -67,8 +68,8 @@ experiment_scripts/
 ├── conf/                    # ✅ db.<backend>.env (0600, gitignored), scale.{heavy,light}.env
 ├── tools/
 │   ├── check_scripts.sh     # ✅ shellcheck ratchet (legacy list only shrinks)
-│   ├── bundle.sh            # ⬜ step 7: inline lib + selected backends into one scp-able file
-│   └── deploy.sh            # ⬜ step 7: tar the directory to EC2
+│   ├── bundle.sh            # ✅ step 7: inline lib + selected backends into one scp-able file
+│   └── deploy.sh            # ✅ step 7: overlay-tar the directory to EC2 (backup + verify)
 └── tests/                   # ✅ run_tests.sh, smoke_authoritative.sh + goldens,
                              #    smoke_backend.sh, contract/config tests
 ```
@@ -185,7 +186,7 @@ core rejects unknown flags first.
 | ~~**5 tail (a)**~~ **done** | `mariadb_rocksdb` backend on `_mariadb_common.sh`. No official MariaDB image has the RocksDB engine; verified against `docker.io/devonkupiec/mariadb-rocksdb` (MariaDB 10.3 + MyRocks), which is documented in `conf/db.mariadb_rocksdb.env(.example)` as a verification server and **not** an evidence host. Statistics come from `SHOW GLOBAL STATUS 'Rocksdb%'` + `information_schema.ROCKSDB_CFSTATS/DBSTATS/SST_PROPS`; the legacy `sudo du` of the engine's data directory is gone, `lsm_levels` reports 0 on engines without a per-level view. | Structural smoke PASS (8 phases, dump/restore verified, 6 rows × 57 columns, non-zero compaction/WAL/stall counters); in `BACKEND_SMOKES`, not required (special image) |
 | ~~**5 tail (b)**~~ **done** | `postgresql_json` backend = **only the jsonb data model** of `experiment_postgresql_array_json.sh`, on `_postgresql_common.sh`: DDL `fieldN JSONB`; `backend::size_expression` = Σ over the 10 fields of `COALESCE((SELECT SUM(octet_length(value)) FROM jsonb_array_elements_text(COALESCE(fieldN, '[]'::jsonb))), 0)`; `default_binding=jdbc-array-json`, artifact `jdbc-array-json/target/*.jar`, capability flags copied from `postgresql_textarray`, `postgresql::base_config` defaults. **Everything else in that script is discarded per §4** — phase loop, watcher, statistics columns, key-size/histogram pipeline and CSV all come from core exactly as for `postgresql_textarray`. Also done: deleted the reserved `--instrument` branch in `experiment.sh` and rewrote the stale deferral text in `lib/config.sh` (`config::warn_discarded_legacy`). **Held:** the one-line shim mapping `VALUE_VARIANT` → backend (jsonb_array→`postgresql_json`, text_array→`postgresql_textarray`, text_scalar→`postgresql_row`), because `run_postgresql_array_json_full_visibility.sh` execs that script and shimming it deletes full visibility before this plan's own 8c EC2 gate — see REFACTOR_STATUS "Open questions". | Standard smoke goldens PASS; in `BACKEND_SMOKES` **and** `REQUIRED_BACKEND_SMOKES`; `./experiment.sh postgresql_json --check` PASS; structural smoke PASS (8 phases, 74-column CSV) |
 | ~~**6**~~ **done** | Baseline mode. `lib/lifecycle_baseline.sh` is a *sequence of the shared phase steps* from `lib/lifecycle.sh`, not a second loop: `run_experiment` became a mode dispatcher and its body was split into `experiment_bootstrap`, `run_load_phase`, `run_reference_load_phase`, `run_extend_phase`, `merge_value_sizes`, `vacuum_if_enabled`, `snapshot_keys`/`remove_new_keys`, `run_measured_phase`, `run_reference_phase`, `run_comparison_phases`, `experiment_complete`; the baseline engine calls bootstrap(false, `$DB_NAME`) → load → (extend → vacuum → measure) × epochs×steps. A unit test fails if that file ever invokes YCSB, samples metrics or writes a row itself. Legacy `*_baseline.sh` bodies discarded per §0 — **nine** files deleted (`experiment_{couchbase,mariadb_innodb,mariadb_rocksdb,mongodb,neo4j,postgresql,postgresql_array,postgresql_array_json,sample}_baseline.sh`; their legacy CSV headers were first captured as data in `tests/golden/legacy_csv_columns.txt`, which is what the column-comparability test now reads). Config layer: `EXPERIMENT_MODE` (validated, `_baseline` artefact suffix, `COMPARISON_INTERVAL=0`); preflight of a baseline run does not require pg_dump. | Goldens byte-identical after the split; `tests/smoke_backend.sh <backend> baseline` PASS for postgresql_textarray (+ mongodb, mariadb_innodb): 3 phases, the 5 forbidden phases absent, neither comparison database created, CSV header asserted **exactly** equal to the base columns with `metrics::header` spliced in (74/22/132 columns — identical to each backend's mainline schema), one row per measured phase |
-| **7** | Ops: `tools/bundle.sh` (inline lib + selected backends into one `experiment.bundle.sh`, preserving the single-file scp deploy at `README.md:344-390`), `tools/deploy.sh` (tar to EC2), README rewrite (§Deploy / Clean EC2 Run / Launcher / Verify / Output Layout), `.gitignore` for `.DS_Store`/`__pycache__`, remove committed `.pyc`. | Fresh-EC2 dry run executed strictly from the rewritten runbook; bundle smoke-tested in CI |
+| ~~**7**~~ **done** | Ops: `tools/bundle.sh` generates `experiment.bundle.sh` (runner kept verbatim with `lib/*.sh` inlined at their source lines, one loader function per selected backend + embedded `_*.sh` shared modules, registry discovery/loading overridden to the embedded code — both modes therefore share every byte of engine logic); `tools/deploy.sh` ships tracked `experiment_scripts/` files as a tar **overlay** after a remote timestamped backup (untracked server confs and jars survive), verifying with `bash -n` + `--list-backends`; README rewritten around `experiment.sh` (Quick Start / Backends / Modes / Config / Deploy / Clean EC2 Run / Launcher / Verify / Output Layout / Tests), full-visibility material reduced to a frozen pointer until 8c; `.gitignore` covers `__pycache__`/`*.pyc`, run-output directories and generated bundles (no `.pyc` turned out to be tracked); `tests/test_logging.sh` deleted — the open question resolved as "delete" (pre-refactor experiment runner with a hardcoded password, executed by nothing). | `tests/test_bundle.sh`: 19 assertions incl. byte-identical `--list-backends`/`--dry-run` vs the tree for all nine backends, aliases and subset bundles; `run_tests.sh` additionally runs a **full benchmark through the bundle** (structural smoke PASS); deploy overlay verified locally (harness replaced, server-only conf survived). "Fresh-EC2 dry run from the rewritten runbook" folds into 8c's runbook re-execution |
 | **8a/8b** | ~~`postgresql_json` backend · full-visibility instrumentation module~~ — 8a folded into **5 tail (c)**; 8b **cancelled** (§4: observability is discarded) |
 | **8c** | Delete all remaining shims and legacy scripts, incl. `experiment_postgresql_array_json.sh`, `run_postgresql_array_json_full_visibility.sh` and `benchmark_observability.py`; rewrite README to drop §Frozen Full Visibility Profile and document `postgresql_json`. **Gate: only after user confirms on EC2 hardware** — the legacy script is the provenance of existing full-visibility evidence, so keep it runnable (from the tag) until then. | Full runbook re-executed from scratch |
 
@@ -202,11 +203,11 @@ core rejects unknown flags first.
   fixed by the authoritative script; stats columns backend-declared via
   `backend::metric_names`.
 
-### Deployment
-README deploys a single self-contained `.sh` + `benchmark_observability.py` by scp
-(`README.md:344-390`). After step 7: primary path ships the directory (`tools/deploy.sh`);
-single-file UX preserved via generated (never hand-edited) `experiment.bundle.sh`, with CI
-smoking both tree and bundle.
+### Deployment (step 7 delivered)
+Primary path: `tools/deploy.sh` (tar overlay of tracked `experiment_scripts/` files,
+remote backup, post-deploy verification). Single-file UX preserved via the generated,
+never hand-edited `experiment.bundle.sh`; CI builds it, asserts tree/bundle output
+equivalence and runs one full benchmark through it.
 
 ### Risks that still apply
 - **Larger blast radius**: a `lib/` regression hits every backend — per-backend contract
@@ -234,6 +235,7 @@ smoking both tree and bundle.
   shared statistics column set.
 - ✅ Both phase sequences (`mainline`, `--mode baseline`) execute the same phase-step functions and
   write the same CSV schema; the baseline engine contains no YCSB invocation of its own.
-- README deploy works against the new layout; the bundle reproduces today's single-file scp
-  workflow.
+- ✅ README deploy works against the new layout (`tools/deploy.sh`); the bundle reproduces
+  today's single-file scp workflow (equivalence + full run in CI). EC2 re-execution of the
+  whole runbook happens with 8c.
 - Behaviour of the authoritative script stays byte-identical to smoke goldens.

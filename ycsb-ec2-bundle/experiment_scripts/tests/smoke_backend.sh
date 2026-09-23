@@ -135,7 +135,10 @@ WORKLOAD_UNTRACKED_BEFORE="$(git -C "$SCRIPTS_DIR" ls-files --others --exclude-s
 echo "[backend-smoke] workdir=$WORKDIR"
 
 set +e
-"$SCRIPTS_DIR/experiment.sh" "$BACKEND" > "$WORKDIR/run.out" 2>&1
+# RUNNER lets the suite drive a different entrypoint with the same contract - currently
+# only the generated single-file bundle (tests/run_tests.sh, step "bundle harness smoke").
+RUNNER="${RUNNER:-$SCRIPTS_DIR/experiment.sh}"
+"$RUNNER" "$BACKEND" > "$WORKDIR/run.out" 2>&1
 rc=$?
 set -e
 tail -15 "$WORKDIR/run.out" | sed 's/^/[run] /'

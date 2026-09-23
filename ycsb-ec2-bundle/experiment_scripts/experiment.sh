@@ -100,8 +100,11 @@ while (($#)); do
     case "$1" in
         -h|--help) usage; exit 0 ;;
         --list-backends)
+            # Load each backend for its display name rather than grepping its file: inside
+            # the generated bundle (tools/bundle.sh) there are no per-backend files to read.
             for b in $(registry::available); do
-                printf '%-26s %s\n' "$b" "$(sed -n 's/^display_name=//p' "$BACKENDS_DIR/$b.sh" | head -1)"
+                registry::load "$b"
+                printf '%-26s %s\n' "$b" "$(registry::info display_name)"
             done
             exit 0 ;;
         --config) CONFIG_FILES+=("${2:?--config needs a file}"); shift 2 ;;

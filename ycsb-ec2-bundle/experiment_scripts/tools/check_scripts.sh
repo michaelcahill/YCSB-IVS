@@ -33,8 +33,11 @@ is_legacy() {
 status=0
 files=()
 while IFS= read -r -d '' f; do files+=("$f"); done < <(
-    find . -type f \( -name '*.sh' \) \
-        -not -path './analysis/*' -not -path '*/node_modules/*' -print0 | sort -z
+    # Generated bundles are excluded: they are rebuilds of files checked here, and their
+# registry overrides would only add noise (tools/bundle.sh is the source of truth).
+find . -type f \( -name '*.sh' \) \
+        -not -path './analysis/*' -not -path '*/node_modules/*' \
+        -not -name 'experiment.bundle*.sh' -print0 | sort -z
 )
 
 echo "[check] bash -n on ${#files[@]} shell files"

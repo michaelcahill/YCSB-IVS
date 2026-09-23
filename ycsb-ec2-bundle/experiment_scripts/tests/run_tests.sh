@@ -30,6 +30,14 @@ else
     exit 1
 fi
 
+step "bundle build + tree/bundle equivalence"
+if bash tests/test_bundle.sh; then
+    :
+else
+    echo "[tests] bundle tests FAILED"
+    exit 1
+fi
+
 step "python unit tests"
 if python3 -m unittest discover -s tests -t tests -v 2>&1 | tail -25; then
     :
@@ -91,6 +99,21 @@ step "baseline mode smoke (--mode baseline, PostgreSQL)"
 # already required for the goldens run, so it costs one extra tiny benchmark and no new setup.
 if db_available; then
     bash tests/smoke_backend.sh postgresql_textarray baseline
+elif [[ "${REQUIRE_DB:-0}" == 1 ]]; then
+    echo "[tests] REQUIRE_DB=1 but no PostgreSQL answered at $PROBE_HOST:$PROBE_PORT as $PROBE_USER"
+    exit 1
+else
+    echo "[tests] SKIPPED - set DB_PWD (and optionally REQUIRE_DB=1) to run it"
+fi
+
+step "bundle harness smoke (full run through experiment.bundle.sh)"
+# The deployable single file must not merely parse - it runs the same structural smoke as
+# the tree whenever a PostgreSQL server is available, so a packaging bug cannot ship as a
+# "works on the tree" harness.
+if db_available; then
+    bash tools/bundle.sh >/dev/null
+    RUNNER="$SCRIPTS_DIR/experiment.bundle.sh" bash tests/smoke_backend.sh postgresql_textarray
+    rm -f "$SCRIPTS_DIR/experiment.bundle.sh"
 elif [[ "${REQUIRE_DB:-0}" == 1 ]]; then
     echo "[tests] REQUIRE_DB=1 but no PostgreSQL answered at $PROBE_HOST:$PROBE_PORT as $PROBE_USER"
     exit 1

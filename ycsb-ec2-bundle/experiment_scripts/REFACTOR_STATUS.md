@@ -1,7 +1,8 @@
 # Refactor Status — experiment scripts
 
 Plan: [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) · Branch: `refactor/experiment-scripts`
-Last updated: **steps 1–6 complete — every backend is ported and verified end-to-end** (nine:
+Last updated: **steps 1–7 complete — backends ported, both modes running, ops tooling and
+runbook shipped.** Nine backends verified end-to-end (
 `postgresql_textarray`, `postgresql_row`, `postgresql_json`, `postgrenosql`, `mariadb_innodb`,
 `mariadb_rocksdb`, `mongodb`, `neo4j`, `couchbase`) — one runner (`experiment.sh <backend>`), nine
 verified backends behind shared modules, an engine that calls nothing but `backend::*`, a layered
@@ -10,10 +11,12 @@ config layer with a legacy-launcher alias shim (variable names *and* backend nam
 directory). Goldens unchanged apart from the intended `-P` paths. The single leftover of step 5 —
 the shim for `experiment_postgresql_array_json.sh` — is **held by your decision**: that script is
 `run_postgresql_array_json_full_visibility.sh`'s callee, so shimming it would delete full
-visibility before the EC2 gate that exists to protect it; it folds into step 8c. Next up:
-**step 7 (bundle/deploy tooling + README rewrite)**, then the EC2-gated 8c. Step 6 delivered
+visibility before the EC2 gate that exists to protect it; it folds into step 8c. Step 6 delivered
 `--mode baseline`: one set of phase steps, two engines (`mainline`, `baseline`), and the nine
-legacy `experiment_*_baseline.sh` scripts are gone. There is no instrumentation module any more.
+legacy `experiment_*_baseline.sh` scripts are gone. Step 7 delivered `tools/bundle.sh`
+(generated single-file harness, tree/bundle equivalence + full benchmark through the bundle in CI),
+`tools/deploy.sh` (overlay tar + remote backup + verify), the rewritten runbook, `.gitignore`
+cleanup and the deletion of `tests/test_logging.sh`. **Only the EC2-gated step 8c remains.**
 
 Read this file first after an interruption. Append to the **Log** at every meaningful
 checkpoint, and keep the **Step status** table current.
@@ -80,7 +83,7 @@ directory is kept for inspection.
 | 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | ✅ done | immutable provenance-tagged files; all in-place rewrites gone; smoke asserts `../workloads` stays clean |
 | 5 | Engine + backend ports | ✅ **done** | **nine backends, all verified end-to-end:** engine drives only `backend::*`; PostgreSQL split into `_postgresql_common.sh` + `postgresql_textarray`/`postgresql_row`/`postgresql_json`/`postgrenosql`, MariaDB into `_mariadb_common.sh` + `mariadb_innodb`/`mariadb_rocksdb`, plus `mongodb`, `neo4j`, `couchbase` — each ported legacy script is a one-line shim and in `BACKEND_SMOKES`. Only the `experiment_postgresql_array_json.sh` shim is outstanding, **deliberately held** (its sibling launcher execs it) and therefore folded into 8c |
 | 6 | `--mode baseline`; delete legacy `*_baseline.sh` | ✅ done | `lib/lifecycle_baseline.sh` is a sequence of the shared steps (a unit test forbids it from re-implementing one); `run_experiment` dispatches on `EXPERIMENT_MODE`; nine legacy baseline runners deleted, their CSV headers kept as `tests/golden/legacy_csv_columns.txt`; goldens unchanged; baseline smoke PASS ×3 backends |
-| 7 | `tools/bundle.sh`, `tools/deploy.sh`, README rewrite, gitignore | ⬜ pending | |
+| 7 | `tools/bundle.sh`, `tools/deploy.sh`, README rewrite, gitignore | ✅ done | bundle = runner verbatim + inlined libs + per-backend loader functions (registry hooks `available`/`resolve`/`source_backend` overridden); `tests/test_bundle.sh` (19 assertions) + full benchmark through the bundle in `run_tests.sh`; deploy.sh overlay verified locally with remote-backup semantics; README rewritten around `experiment.sh` incl. `--mode baseline`; `.gitignore`: `__pycache__`/`*.pyc`/generated bundles/run-output dirs (no `.pyc` was tracked); `tests/test_logging.sh` deleted |
 | 8a/8b | ~~`postgresql_json` backend · fullview instrumentation module~~ | ➖ folded/cancelled | 8a → step 5(b) **done** (`postgresql_json`, verified); 8b **cancelled** — WAL / `pg_stat_statements` / residency / prewarm / checkpoint-log / sampling / detoast probes are discarded (plan §4), and the `--instrument` placeholder is deleted from `experiment.sh` |
 | 8c | Delete remaining shims/legacy scripts (+ `benchmark_observability.py`) | ⬜ pending | **gate:** only after user confirms on EC2 hardware — legacy array_json is the provenance of existing full-visibility evidence |
 
@@ -88,9 +91,12 @@ Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked · ➖ cancell
 
 ## Where to resume
 
-All backends are ported and both phase sequences exist. Next is **step 7 (tooling + README
-rewrite: `tools/bundle.sh`, `tools/deploy.sh`, `.gitignore`, remove committed `.pyc`, rewrite the
-runbook)**, then the EC2-gated 8c. The items below are the carry-overs to remember while doing it.
+**Steps 0–7 are complete. The only remaining work is step 8c, which is gated on the user
+confirming on EC2 hardware** (delete the legacy shims incl. `experiment_postgresql_array_json.sh`,
+`run_postgresql_array_json_full_visibility.sh`, `benchmark_observability.py`; drop the README's
+frozen full-visibility pointer; re-execute the runbook from scratch on EC2 — that run also covers
+the step-7 deploy/bundle paths and a first `--mode baseline` evidence run). The held array_json
+shim folds into 8c. The items below are the carry-overs to remember for it.
 
 - **Held for 8c: the `experiment_postgresql_array_json.sh` shim.** The plan's last item of step 5
   is a one-line shim mapping `VALUE_VARIANT` → backend, but
@@ -163,8 +169,14 @@ runbook)**, then the EC2-gated 8c. The items below are the carry-overs to rememb
   all five of its LSM columns were empty on this engine. Statistics now come from
   `information_schema.ROCKSDB_CFSTATS / ROCKSDB_DBSTATS / ROCKSDB_SST_PROPS`, and the legacy
   `sudo du /var/lib/mysql/#rocksdb/*.sst` is replaced by `total_sst_size` from SQL.
-- Step 7: tooling + README rewrite (see plan §8) — the runbook still documents neither
-  `experiment.sh`'s options nor `--mode baseline`. No instrumentation layer —
+- Step 7 facts worth keeping: the bundle is generated into `experiment_scripts/experiment.bundle.sh`
+  (gitignored; tests rebuild and remove it) and must **run inside `experiment_scripts/`** — it
+  finds `../bin`, `conf/`, `workloads/` and `watcher.sh` relative to itself, so it updates harness
+  code on an existing tree, never replaces the tree. `check_scripts.sh` excludes
+  `experiment.bundle*.sh`. `registry.sh` gained exactly one indirection (`registry::source_backend`)
+  and `experiment.sh --list-backends` now loads backends instead of grepping their files — both so
+  the bundle overrides three registry functions and nothing else. `smoke_backend.sh` honours
+  `RUNNER=<path>` (used to smoke the bundle). No instrumentation layer exists —
   plan §4 records why the array_json samplers are dropped rather than ported.
 
 ## Facts that save time
@@ -272,10 +284,9 @@ runbook)**, then the EC2-gated 8c. The items below are the carry-overs to rememb
 - EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it. (Step 6's
   `--mode baseline` is verified locally only; an EC2 baseline run would be the first evidence for
   the deleted legacy baselines' replacement.)
-- **`tests/test_logging.sh` is not a test.** It is a 350-line pre-refactor experiment runner (with
-  `DB_PWD="usyd2026"` hardcoded) that sits in `tests/`, is executed by nothing, and passes the
-  shellcheck ratchet only by accident of its age. Delete it at step 7 (which touches the test tree
-  anyway), or say why it stays?
+- ~~**`tests/test_logging.sh` is not a test.**~~ **Resolved at step 7: deleted.** It was a
+  350-line pre-refactor experiment runner (hardcoded `DB_PWD="usyd2026"`) executed by nothing;
+  recoverable from git if anyone disputes the call.
 
 ## Log
 
@@ -386,9 +397,52 @@ runbook)**, then the EC2-gated 8c. The items below are the carry-overs to rememb
   `( set -e; f; printf … )`, a failing `f` does not abort — the subshell prints and exits 0. In a
   test helper whose result is used as a condition, write `f || exit 1`.
 
+### 2026-09-24 — step 7: bundle + deploy tooling, README rewrite, test-tree cleanup
+
+- **`tools/bundle.sh`** generates `experiment.bundle.sh`: the runner body kept **verbatim**,
+  with each `source "$LIB_DIR/x.sh"` line replaced by that file's content (order preserved),
+  every selected backend wrapped in a `_bundle_load_<name>()` function, shared `_*.sh` modules
+  embedded as `_bundle_module_<name>()` (their `source "$(…)/_x.sh"` lines rewritten to
+  `_bundle::module` calls — any *other* source form fails generation rather than being dropped),
+  and exactly three registry overrides (`available`, `resolve`, `source_backend`). Generation
+  records UTC time + git commit (dirty flag), runs `bash -n`, and self-checks by loading every
+  bundled backend through `--list-backends`.
+- **Two core changes made that possible**, both behaviour-preserving: `registry::load` gained a
+  one-line indirection (`registry::source_backend`), and `--list-backends` loads backends for
+  their display name instead of sed-ing `lib/backends/*.sh` (no files inside a bundle).
+- **`tools/deploy.sh`**: tarball of *tracked* `experiment_scripts/` files, extracted as an
+  overlay on the target after a remote timestamped backup; untracked server files
+  (`conf/db.*.env`, jars, `analysis/`) survive — verified locally by extracting over a fake
+  tree. `--include-config` opts into shipping credentials; `--dry-run` prints the payload.
+  Post-deploy verification on the target: `bash -n` + `--list-backends`.
+- **CI for the bundle**: new `tests/test_bundle.sh` (19 assertions: generated header, no
+  unrewritten source lines, all loaders present, byte-identical `--list-backends` and per-backend
+  `--dry-run` vs the tree ×9, alias resolution, unknown-backend rejection, subset bundles).
+  `run_tests.sh` additionally runs a **full structural smoke through the bundle**
+  (`RUNNER=… tests/smoke_backend.sh`, new env override) whenever PostgreSQL is reachable.
+- **README rewritten** around `experiment.sh`: Quick Start / Backends (aliases, PG≥18) / Host
+  Requirements / Modes and Phases / Configuration / Options / Deploying to EC2 (deploy.sh primary,
+  bundle single-file path) / Clean EC2 Run (launcher is pure env + one exec — no workload sedding) /
+  Verify A Run / Output Layout / Stop-Restart / Tests. Full-visibility content reduced to a
+  **frozen pointer** (§Legacy, deleted at 8c; history via the `pre-refactor-scripts` tag). The old
+  §Deploy's scp-pair dance and launcher template are gone. `BUNDLE_README.md`'s experiment-script
+  sections now describe the runner instead of per-database scripts.
+- **Cleanup**: no `.pyc` was ever tracked (plan item pre-verified); root `.gitignore` gains
+  `__pycache__/` + `*.pyc`; `experiment_scripts/.gitignore` gains generated bundles and the
+  run-output directories (`javagc/ restore_logs/ stepdetail_logs/ vacuum_logs/`).
+  **Deleted `tests/test_logging.sh`** (open question resolved: a 350-line pre-refactor runner
+  with a hardcoded password that nothing executed).
+- Suite after the change: static checks PASS · **19 bundle + 63 config/workload shell tests**
+  + 7 python tests OK · authoritative smoke PASS vs unchanged goldens · baseline smoke PASS ·
+  **bundle harness smoke PASS** (full mainline run through `experiment.bundle.sh`) · all eight
+  mainline backend smokes PASS (PostgreSQL ×3 + postgrenosql on the system server, MariaDB ×2,
+  MongoDB, Neo4j, Couchbase in containers).
+
 ### Next checkpoint
 
-Step 7: `tools/bundle.sh` (single-file bundle), `tools/deploy.sh`, README rewrite (§Deploy / Clean
-EC2 Run / Launcher / Verify / Output Layout — and the `--mode baseline` flag, still undocumented),
-`.gitignore` for `.DS_Store`/`__pycache__`, remove the committed `.pyc`. Then 8c, EC2-gated. Steps
-5 and 6 are complete; the array_json shim is settled (held for 8c).
+Step **8c only**, EC2-gated: delete the remaining legacy scripts and shims (incl.
+`experiment_postgresql_array_json.sh`, `run_postgresql_array_json_full_visibility.sh`,
+`benchmark_observability.py`) plus the held array_json shim, drop the README's frozen
+full-visibility pointer, and re-execute the rewritten runbook from scratch on EC2 — that run
+covers deploy.sh, the bundle path, and a first `--mode baseline` measurement. Needs the user's
+answer to "who runs it, against which instance".

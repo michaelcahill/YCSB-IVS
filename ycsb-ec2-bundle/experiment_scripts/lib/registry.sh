@@ -71,12 +71,20 @@ registry::resolve() {
     return 2
 }
 
+# registry::source_backend TARGET — how a resolved backend gets into this shell. The tree
+# sources the file; the generated bundle (tools/bundle.sh) overrides this to call an
+# embedded loader function instead. Every other load step stays here so the two cannot drift.
+registry::source_backend() {
+    local target="${1:?resolved backend required}"
+    # shellcheck disable=SC1090  # path supplied by registry::resolve
+    source "$target"
+}
+
 # Load a backend and verify it implements the contract.
 registry::load() {
     local file
     file="$(registry::resolve "${1:-}")" || return 2
-    # shellcheck disable=SC1090
-    source "$file"
+    registry::source_backend "$file"
     ACTIVE_BACKEND="$(basename "$file" .sh)"
 
     local missing=0 fn
