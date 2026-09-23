@@ -1,11 +1,11 @@
 # Refactor Status — experiment scripts
 
 Plan: [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) · Branch: `refactor/experiment-scripts`
-Last updated: **steps 1–4 complete, plus the engine half of step 5** — one runner
-(`experiment.sh <backend>`), a PostgreSQL backend module whose only interface is `backend::*`,
-a layered config layer with a legacy-launcher alias shim, and **workload files are read-only
-templates** (one generated file per phase in the experiment directory). Goldens unchanged apart
-from the intended `-P` paths.
+Last updated: **steps 1–4 complete; step 5 in progress (PostgreSQL done)** — one runner
+(`experiment.sh <backend>`), two verified PostgreSQL backends behind a shared module, an engine
+that calls nothing but `backend::*`, a layered config layer with a legacy-launcher alias shim,
+and **workload files are read-only templates** (one generated file per phase in the experiment
+directory). Goldens unchanged apart from the intended `-P` paths.
 
 Read this file first after an interruption. Append to the **Log** at every meaningful
 checkpoint, and keep the **Step status** table current.
@@ -41,6 +41,7 @@ bash tools/check_scripts.sh                       # bash -n on all shell files, 
 bash tests/test_config_workload.sh                # config layer + workload generation, no DB
 python3 -m unittest discover -s tests -t tests    # mock-based runner tests, no DB
 DB_PWD=USyd2025 bash tests/smoke_authoritative.sh # real PG18 end-to-end vs goldens
+DB_PWD=USyd2025 bash tests/smoke_backend.sh postgresql_row  # structural check, any reachable backend
 ```
 
 The smoke run takes ~40 s and uses its own databases (`ycsb_smoke`,
@@ -57,7 +58,7 @@ work directory is kept for inspection.
 | 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ✅ done | PG backend module (387 ln) with `backend::*` contract + legacy aliases; `lib/registry.sh` discovers and validates backends; `experiment.sh` is the single entry point; authoritative script is now a compatibility shim |
 | 3 | `config.sh` + `conf/` presets + alias shim + `--help/--dry-run/--list-backends` | DONE | layered config with `${VAR:-default}` everywhere and `config::derive_paths` last; flags `--var/--config/--epochs/--steps/--run-id/--type/--scale/--workload/--experiment-dir/--dry-run/--list-backends`; legacy alias shim (`DIST`, `WORK`, `UNCHANGE_DB_NAME`, `EXPERIMENT_EPOCHS`, `EXPERIMENT_RUNS_PER_EPOCH`, `DB_PASSWORD`, `FIELD_LENGTH_ORIGINAL`, `vacuum`, `EXTEND_*`/`RUN_*` proportions) with deprecation lines; `conf/scale.{heavy,light}.env`; 31 assertions in `tests/test_config_workload.sh`. `--mode baseline` / `--instrument` still rejected until steps 6 and 8b |
 | 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | DONE | `lib/workload.sh`: one immutable, provenance-tagged file per YCSB invocation; the 22 in-place `perl -i -p` rewrites and the `awk` strip are gone from `lib/lifecycle.sh`; preflight no longer needs a writable workload; smoke asserts `../workloads` stays clean and that all 8 phase files exist |
-| 5 | `lifecycle.sh` engine + backend ports (PG row -> postgrenosql -> mariadb x2 -> mongodb -> neo4j -> couchbase) | IN PROGRESS | **engine half done:** `lib/lifecycle.sh` drives only `backend::*`, the PostgreSQL legacy aliases are deleted, and a hygiene test fails if either regresses. Remaining backends cannot be verified on this machine (no servers). |
+| 5 | `lifecycle.sh` engine + backend ports (PG row -> postgrenosql -> mariadb x2 -> mongodb -> neo4j -> couchbase) | IN PROGRESS | **done:** engine drives only `backend::*`; PostgreSQL split into `_postgresql_common.sh` + `postgresql_textarray` / **`postgresql_row`** (both verified end-to-end); `experiment_postgresql.sh` and `experiment_postgresql_array.sh` are shims. **Remaining:** postgrenosql, mariadb x2, mongodb, neo4j, couchbase - no servers on this machine. |
 | 6 | `--mode baseline`; delete legacy `*_baseline.sh` | ⬜ pending | |
 | 7 | `tools/bundle.sh`, `tools/deploy.sh`, README rewrite, gitignore | ⬜ pending | |
 | 8a | `postgresql_json` backend | ⬜ pending | |
@@ -68,15 +69,20 @@ Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked
 
 ## Where to resume
 
-Steps 3, 4 and the engine half of step 5 are complete: `lib/lifecycle.sh` calls nothing but
-`backend::*`, the PostgreSQL module's legacy aliases are gone, and the inline 34x value-size
-SQL is replaced by `backend::key_sizes` / `total_size` / `list_keys`. Next up is **step 5b**:
-port the remaining backends.
+Step 5 is half done and PostgreSQL is fully on the new architecture: the engine calls nothing
+but `backend::*`, the PostgreSQL specifics live in `lib/backends/_postgresql_common.sh` plus
+one file per schema (`postgresql_textarray`, **`postgresql_row`**), and both backends pass an
+end-to-end run here. Next up is **step 5b, continuing with postgrenosql**.
 
-1. Step 5b: add backends one at a time (`postgresql_row` -> `postgrenosql` ->
-   `mariadb_innodb` -> `mariadb_rocksdb` -> `mongodb` -> `neo4j` -> `couchbase`) and retire
-   each legacy script as an `exec` shim; retarget `tests/test_postgresql_array_pg18.py`,
-   which still points at `experiment_postgresql_array.sh`.
+1. Before porting a non-PostgreSQL backend: the results-CSV statistics columns are still
+   PostgreSQL-specific (`binding_field_names` / `stats_header` in `lib/metrics.sh`, plus
+   `collect_cpu_memory_metrics` sampling the `postgres` OS account). Move that into the
+   backend (`backend::metric_names`, `backend::stats_header`) with core keeping only
+   CPU/memory; otherwise every non-PostgreSQL CSV carries PG column names.
+2. Then port one at a time: postgrenosql -> mariadb_innodb -> mariadb_rocksdb -> mongodb ->
+   neo4j -> couchbase. Each needs a reachable server for `tests/smoke_backend.sh <backend>`;
+   until then the module stays unverified and its legacy script is left in place (no shim, no
+   deletion).
 3. Steps 6-8: baseline mode, tooling/README rewrite, `postgresql_json` backend plus fullview
    instrumentation.
 
@@ -97,6 +103,32 @@ Facts that save time when resuming:
   `backend::size_expression` exist but are **unused so far** - they replace the inline 34x
   size SQL once the engine is rewired.
 - Run everything with `DB_PWD=USyd2025 REQUIRE_DB=1 bash tests/run_tests.sh`.
+
+## Findings during step 5 (backends)
+
+1. **Two PostgreSQL backends, one implementation.** `lib/backends/_postgresql_common.sh`
+   holds the CLI wrapper, PG18 metrics query, preflight, dump/restore, idle wait and the size
+   helpers; a schema module sources it and overrides only `backend::info`, `init_db` (the DDL),
+   `size_expression` and `default_config`. The registry skips `_`-prefixed files, so shared
+   code is never advertised as a backend.
+2. **Required build artifacts follow the configured binding** (`$YCSB_BINDING/target/*.jar`),
+   so `jdbc` and `jdbc-array` need no list of their own and the build hint is derived too. The
+   minimum server version comes from `backend::info min_server_version_num` instead of a
+   hardcoded `^18` regex.
+3. **The retargeted mock suite paid for itself:** it caught a regression introduced while
+   extracting the common file (pg_dump's version was checked even when `needs_dump=false`) and
+   made one silent change from steps 1-2 explicit (preflight runs after the log is created).
+4. **Deliberate behaviour, now asserted:** logging starts before preflight so a failed preflight
+   is recorded in the run log; the test checks the log exists and names the failure, instead of
+   checking that no log was written.
+5. `BACKUP_FILE` is `${BACKUP_FILE:-./ycsb_dump.sql}` now - the last connection knob that a
+   preset or the environment could not override.
+6. **New tests:** `tests/smoke_backend.sh <backend>` (structural end-to-end: eight phases, CSV
+   base columns and one row per measured phase, value-size files, histogram, generated
+   workloads, clean `../workloads`) runs for `postgresql_row` inside `run_tests.sh`;
+   `tests/test_postgresql_array_pg18.py` is replaced by
+   `tests/test_postgresql_backend_pg18.py`, which drives the real stack inside a fake YCSB_HOME
+   instead of text-extracting support code from a legacy script.
 
 ## Findings during steps 3-4
 
@@ -206,6 +238,20 @@ Facts that save time when resuming:
 - EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.
 
 ## Log
+
+### 2026-09-24 — step 5b: postgresql_row backend, PostgreSQL specifics shared
+
+- `lib/backends/_postgresql_common.sh` (shared PG implementation) + a slim
+  `postgresql_textarray.sh` and the new `postgresql_row.sh` (metadata, DDL, value-size
+  expression, config only). Registry discovery ignores `_`-prefixed files.
+- `experiment_postgresql.sh` and `experiment_postgresql_array.sh` are one-line shims over
+  `experiment.sh postgresql_row|postgresql_textarray` (-1084 lines of drifted copies): the last
+  two PostgreSQL runners that were still full copies.
+- Tests: `tests/smoke_backend.sh` added (structural, any backend) and wired into
+  `run_tests.sh`; mock suite retargeted to the real stack as
+  `tests/test_postgresql_backend_pg18.py` (7 tests, fully mocked).
+- Suite: static checks PASS - 34 shell + 7 python tests OK - authoritative smoke PASS against
+  unchanged goldens - postgresql_row structural smoke PASS (8 phases, 74 CSV columns).
 
 ### 2026-09-24 — step 5 (engine half): contract only, aliases deleted
 

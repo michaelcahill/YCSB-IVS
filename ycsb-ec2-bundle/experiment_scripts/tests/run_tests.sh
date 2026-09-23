@@ -46,6 +46,11 @@ db_available() {
 step "PostgreSQL smoke run"
 if db_available; then
     bash tests/smoke_authoritative.sh
+    # Structural check of every backend whose server is reachable here. The PostgreSQL
+    # backends are; the others need servers this machine does not run.
+    for backend in postgresql_row; do
+        bash tests/smoke_backend.sh "$backend"
+    done
 elif [[ "${REQUIRE_DB:-0}" == 1 ]]; then
     echo "[tests] REQUIRE_DB=1 but no PostgreSQL answered at $DB_HOST:$DB_PORT as $DB_USERNAME"
     exit 1

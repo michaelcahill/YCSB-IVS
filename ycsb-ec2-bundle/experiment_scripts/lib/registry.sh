@@ -16,17 +16,26 @@ registry::required_functions() {
         backend::total_size backend::list_keys
 }
 
+# Backends are discovered by filename. Files starting with an underscore are shared code
+# that a backend sources (for example _postgresql_common.sh), not backends themselves.
 registry::available() {
-    local f
+    local f base
     for f in "$BACKENDS_DIR"/*.sh; do
         [[ -e "$f" ]] || continue
-        basename "$f" .sh
+        base="$(basename "$f" .sh)"
+        [[ "$base" == _* ]] && continue
+        printf '%s\n' "$base"
     done | sort
 }
 
 # registry::resolve NAME -> path, or non-zero and a helpful message.
 registry::resolve() {
     local name="${1:-}" file
+    [[ -n "$name" && "$name" != _* ]] || {
+        echo "[error] unknown backend: ${name:-<none>} (names starting with '_' are shared code, not backends)" >&2
+        registry::available | sed 's/^/  /' >&2
+        return 2
+    }
     file="$BACKENDS_DIR/$name.sh"
     if [[ -f "$file" ]]; then
         printf '%s\n' "$file"
