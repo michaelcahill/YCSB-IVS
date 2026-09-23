@@ -362,6 +362,8 @@ postgres_preflight() {
 
 restore_comparison_database() {
     local source_rows restored_rows
+    
+    mkdir -p "$(dirname "$RESTORE_LOG")"
     : > "$RESTORE_LOG"
     source_rows=$(pg_exec -d "$DB_NAME" -At -c 'SELECT count(*) FROM usertable;') || return 1
     [[ "$source_rows" =~ ^[0-9]+$ ]] || return 1
@@ -511,39 +513,42 @@ wait_for_idle_postgres() {
 	    # Variant B: Details Count
 	    active_backends=$(pg_exec -d "$database" -At -c \
        		"SELECT backend_type, query, query_start, wait_event, state FROM pg_stat_activity WHERE state != 'idle' AND pid != pg_backend_pid();")
-    	active_count=$(printf '%s\n' "$active_backends" | wc -l)
-	    if [[ "$active_count" == "0" ]]; then
+	    if [[ -z "$active_backends" ]]; then
 			log "END WAIT FOR IDLE POSTGRES duration=$((SECONDS-idle_wait_started))s"
 	       	break
     	fi
+    	active_count=$(grep -c '^' <<< "$active_backends")
     	now=$(date +%s)
     	if (( now - start >= timeout )); then
-            log "TIMEOUT WAIT FOR IDLE POSTGRES: $active_count backend(s) are still not idle: $(printf '%s' "$active_backends" | tr '\n' '\t')"
+            log "TIMEOUT WAIT FOR IDLE POSTGRES: $active_count backend(s) are still not idle: ${active_backends//$'\n'/$'\t'}"
             break
         fi
-	    log "WAITING FOR IDLE POSTGRES - $active_count active processes: $(printf '%s' "$active_backends" | tr '\n' '\t')"
+        log "WAITING FOR IDLE POSTGRES - $active_count active processes: ${active_backends//$'\n'/$'\t'}"
     	sleep "$interval"
 	done	
 }
 
 run_ycsb() {
-    local label="$1" started=$SECONDS rc=0
-    local detail_file
+    local label="$1"
+    local epoch="$2"
+    local details_file started=$SECONDS rc=0
     shift
 
-    detail_file="${LOG_FILE%.log}_epoch${epoch:-0}_step${step:-0}_${label}.raw.log"
-
+#    details_file="stepdetail_logs/${LOG_FILE%.log}_epoch${epoch:-0}_step${step:-0}_${label}"
+    details_file="stepdetail_logs/${LOG_FILE%.log}_epoch${epoch:-0}_${label}.log"
+    mkdir -p "$(dirname "$details_file")"
+    
     log "START YCSB $label"
 
     # Preserve raw output for CSV parsing and retain a separate detailed file.
     # Do not copy it into the main experiment log.
     "$YCSB" "$@" 2>&1 |
-        tee "$OUTPUT_CSV" "$detail_file" > /dev/null || rc=$?
+        tee "$OUTPUT_CSV" "$details_file" > /dev/null || rc=$?
 
     log "END YCSB $label status=$rc duration=$((SECONDS-started))s"
 
     if (( rc != 0 )); then
-        log "ERROR YCSB $label failed; details=$detail_file"
+        log "ERROR YCSB $label failed; details=$details_file"
     fi
 
     return "$rc"
@@ -556,6 +561,8 @@ run_with_metrics() {
     local phase=$2
     local epoch=$3
     local output_csv=$4
+    local rc=0
+    local started=$SECONDS 
     local pg_1s_file=""
     local os_1s_file=""
     local run_buffer_sampler_pid=""
@@ -566,9 +573,11 @@ run_with_metrics() {
 
     metrics_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.metrics"
     db_stats_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.dbstats"
+    details_file="stepdetail_logs/${LOG_FILE%.log}_epoch${epoch:-0}_${phase}.log"
 
     echo "Starting metrics collection for $db_name"
     mkdir -p "${LOG_DIR}"
+    mkdir -p "$(dirname "$details_file")"
     mkdir -p "${LOG_DIR}/javagc"
 
     # Start watcher
@@ -592,12 +601,17 @@ run_with_metrics() {
 
     trap "kill -TERM -$watcher_pid 2>/dev/null" EXIT INT TERM
 
-	# execute ycsb program including JAVA_OPTS to log garbage collector
     log "START YCSB $phase"
+
+	# execute ycsb program including JAVA_OPTS to log garbage collector    
+	started=$SECONDS 
 	JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc-run${RUN}-${phase}-${epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
-    "$@" > "$output_csv"
-    status=$?
+    "$@" 2>&1 | tee "$output_csv" "$details_file" > /dev/null || rc=$?
+
     log "END YCSB $phase status=$rc duration=$((SECONDS-started))s"
+    if (( rc != 0 )); then
+        log "ERROR YCSB $phase failed; details=$details_file"
+    fi
 
     # Stop watcher
     kill -TERM -$watcher_pid 2>/dev/null
@@ -605,7 +619,7 @@ run_with_metrics() {
 
     trap - EXIT INT TERM
 
-    echo "Finished $db_name phase=$phase epoch=$epoch (exit=$status)"
+    echo "Finished $db_name phase=$phase epoch=$epoch (exit=$rc)"
     set -e
 }
 
@@ -945,13 +959,14 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         if [[ $vacuum -eq 1 ]]; then
             vacuum_started=$SECONDS
             vacuum_rc=0
-            vacuum_detail="${LOG_FILE%.log}_iteration${iteration}_epoch${epoch}_step${step}_vacuum.raw.log"
+            vacuum_log="vacuum_logs/${LOG_FILE%.log}_iteration${iteration}_epoch${epoch}_step${step}_vacuum.raw.log"
+            mkdir -p "$(dirname "$vacuum_log")"
 
             log "START VACUUM ANALYZE database=$DB_NAME"
 
             pg_exec -d "$DB_NAME" \
                 -c "VACUUM (ANALYZE, VERBOSE) public.usertable;" 2>&1 |
-                tee "$vacuum_detail" |
+                tee "$vacuum_log" |
                 perl -ne '
                     BEGIN { $| = 1; }
 
@@ -972,7 +987,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             log "END VACUUM ANALYZE database=$DB_NAME status=$vacuum_rc duration=$((SECONDS-vacuum_started))s"
 
             if (( vacuum_rc != 0 )); then
-                log "ERROR VACUUM failed; details=$vacuum_detail"
+                log "ERROR VACUUM failed; details=$vacuum_log"
                 exit "$vacuum_rc"
             fi
         fi
@@ -1115,7 +1130,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             phase="clean-run"
             
             log "Backing up the database started"
-            RESTORE_LOG="./${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_step${step}_restore.log"
+            RESTORE_LOG="${LOG_DIR}/restore_logs/${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_step${step}_restore.log"
             restore_comparison_database
             log "Backing up the database finished"
 
@@ -1218,7 +1233,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             # Resetting the database with new data load
             phase="comparison-load"
             log "=== Executing the load phase for the comparison study ==="
-            run_ycsb "comparison-load" load "$YCSB_BINDING" -s -P "$WORKLOAD_FILE" -P "$JDBC_PROPERTIES" -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD"
+            run_ycsb "comparison-load" "${iteration}" load "$YCSB_BINDING" -s -P "$WORKLOAD_FILE" -P "$JDBC_PROPERTIES" -p db.url="$BACKUP_URL" -p db.user="$DB_USERNAME" -p db.passwd="$DB_PWD"
             total_size_comparison_load=$(pg_exec -d "$BACKUP_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(coalesce(array_to_string(field0, ''), '')) + octet_length(coalesce(array_to_string(field1, ''), '')) + octet_length(coalesce(array_to_string(field2, ''), '')) + octet_length(coalesce(array_to_string(field3, ''), '')) + octet_length(coalesce(array_to_string(field4, ''), '')) + octet_length(coalesce(array_to_string(field5, ''), '')) + octet_length(coalesce(array_to_string(field6, ''), '')) + octet_length(coalesce(array_to_string(field7, ''), '')) + octet_length(coalesce(array_to_string(field8, ''), '')) + octet_length(coalesce(array_to_string(field9, ''), ''))) FROM usertable;")
             log "Comparison-load verification - Epoch:$epoch Step:$step TotalSize:$total_size_comparison_load ExpectedFieldLength:$fieldlengthaverage"
 
@@ -1250,7 +1265,9 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             write_result "FALSE"
         fi
         log "END iteration"
-    done
+        # chance to pause script after an iteration, eg. for maintenance, with 'touch PAUSE_SCRIPT'
+ 		while [[ -e "PAUSE_SCRIPT" ]]; do echo "experiment paused..."; sleep 30; done
+     done
 done
 
 # Delete intermediate temp files
