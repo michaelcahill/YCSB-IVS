@@ -93,7 +93,7 @@ echo "[smoke] database=$DB_HOST:$DB_PORT user=$DB_USERNAME (dbs: $DB_NAME, $UNCH
 echo "[smoke] workdir=$WORKDIR"
 
 set +e
-bash "$TARGET_SCRIPT" > "$WORKDIR/run.out" 2>&1
+bash -c "${TARGET_CMD:-bash "$TARGET_SCRIPT"}" > "$WORKDIR/run.out" 2>&1
 rc=$?
 set -e
 sed 's/^/[run] /' "$WORKDIR/run.out" | tail -20

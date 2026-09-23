@@ -1,7 +1,7 @@
 # Refactor Status — experiment scripts
 
 Plan: [`REFACTOR_PLAN.md`](./REFACTOR_PLAN.md) · Branch: `refactor/experiment-scripts`
-Last updated: **step 1 complete** — core extracted into `lib/`, smoke goldens unchanged, suite green
+Last updated: **steps 1–3 (partly) complete** — one runner (`experiment.sh <backend>`), PostgreSQL backend module + registry + config layer; smoke goldens still byte-identical
 
 Read this file first after an interruption. Append to the **Log** at every meaningful
 checkpoint, and keep the **Step status** table current.
@@ -49,9 +49,9 @@ work directory is kept for inspection.
 | --- | --- | --- | --- |
 | 0 | Fix §10 bugs; capture smoke goldens; add CI checks | ✅ done | all four §10 bugs fixed and verified against real PG 18 + real YCSB; `tools/check_scripts.sh`, `tests/run_tests.sh`, `tests/smoke_authoritative.sh` + goldens added; stale mock test repaired (7 tests OK) |
 | 1 | Port core into `lib/{common,metrics,results,keysizes}.sh` | ✅ done | runner 1253 → 1022 lines; libs = common 119, results 75, keysizes 61, metrics 48. Function + top-level-name inventories verified identical to `HEAD` (nothing lost/duplicated); smoke goldens unchanged |
-| 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ⏳ in progress | start here: move the PG18 support block (pg_cli/pg_exec/collect_postgres_metrics/postgres_preflight/restore_comparison_database/wait_for_idle_postgres/initialize_database/close_db + size SQL) into the backend, then add the dispatcher and retarget `tests/test_postgresql_array_pg18.py` (it still points at `experiment_postgresql_array.sh`) |
+| 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ✅ done | PG backend module (387 ln) with `backend::*` contract + legacy aliases; `lib/registry.sh` discovers and validates backends; `experiment.sh` is the single entry point; authoritative script is now a compatibility shim |
 | 2 | `lib/backends/postgresql_textarray.sh`, `registry.sh`, `experiment.sh` dispatcher | ⬜ pending | |
-| 3 | `config.sh` + `conf/` presets + alias shim + `--help/--dry-run/--list-backends` | ⬜ pending | |
+| 3 | `config.sh` + `conf/` presets + alias shim + `--help/--dry-run/--list-backends` | ⏳ mostly done | layered config, `${VAR:-default}` everywhere, `config::derive_paths` last; flags `--var/--config/--epochs/--steps/--run-id/--type/--dry-run/--list-backends`; `conf/README.md` + 2 `.example` files. **Missing:** legacy alias shim (`DIST→EXTEND_DIST`, `EXPERIMENT_EPOCHS→NUM_EPOCHS`, …) needed before EC2 launchers can switch; `--mode baseline` / `--instrument` currently rejected |
 | 4 | Workload generation into `$EXPERIMENT_DIR/workloads/` | ⬜ pending | unit-testable without any DB |
 | 5 | `lifecycle.sh` engine + backend ports (PG row → postgrenosql → mariadb ×2 → mongodb → neo4j → couchbase) | ⬜ pending | only PG-family can be verified locally; others have no server here |
 | 6 | `--mode baseline`; delete legacy `*_baseline.sh` | ⬜ pending | |
@@ -61,6 +61,47 @@ work directory is kept for inspection.
 | 8c | Delete remaining shims/legacy scripts | ⬜ pending | **gate:** only after user confirms on EC2 hardware |
 
 Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked
+
+## Where to resume
+
+Next up is **step 4: workload generation** (`lib/workload.sh`, no writes to `workloads/`).
+Then, in order:
+
+1. Step 3 leftovers: legacy alias shim in `lib/config.sh` (required before existing EC2
+   launchers can use `experiment.sh`) and `conf/scale.{heavy,light}.env`.
+2. Step 4: replace the 22 in-place `perl -i -p` workload rewrites with generated files under
+   `$EXPERIMENT_DIR/workloads/` wired through `-P`; assert
+   `git diff --exit-code ../workloads` after a run.
+3. Step 5: switch `lib/lifecycle.sh` from the legacy PG aliases to `backend::*`, delete the
+   aliases, add the remaining backends, and retarget
+   `tests/test_postgresql_array_pg18.py` (it still points at `experiment_postgresql_array.sh`).
+4. Steps 6–8: baseline mode, tooling/README, `postgresql_json` backend + fullview instrumentation.
+
+Facts that save time when resuming:
+
+- `run_experiment()` in `lib/lifecycle.sh` is the engine (moved verbatim), so it still mutates
+  `$WORKLOAD_FILE` in place with `perl -i -p`, and still calls the legacy PG names
+  (`pg_exec`, `collect_postgres_metrics`, `postgres_preflight`,
+  `restore_comparison_database`, `wait_for_idle_postgres`, `initialize_database`, `close_db`)
+  which the backend module defines.
+- `backend::key_sizes`, `backend::total_size`, `backend::list_keys` and
+  `backend::size_expression` exist but are **unused so far** — they replace the inline 34×
+  size SQL once the engine is rewired.
+- Run everything with `DB_PWD=USyd2025 REQUIRE_DB=1 bash tests/run_tests.sh`.
+
+## Findings during steps 2–3
+
+1. **Config-layer bug found and fixed:** paths were derived inside
+   `config::init_defaults`, so overriding `TYPE`/`SCALE` via `--config`/`--var` renamed the
+   result CSV but not `$EXPERIMENT_DIR` (already captured by a `${VAR:-…}` guard). Derivation
+   now happens exactly once, after every configuration layer.
+2. **Both entry points verified identical:** `bash ./experiment.sh postgresql_textarray`
+   (`TARGET_CMD='bash ./experiment.sh postgresql_textarray' tests/smoke_authoritative.sh`) and
+   the compatibility shim both match the same goldens.
+3. `lib/registry.sh` gives optional hooks (`backend::wait_idle`, `dump_restore`, `truncate`,
+   `close`, `parse_args`) no-op defaults, so a minimal backend implements only:
+   `info`, `default_config`, `preflight`, `init_db`, `collect_metrics`, `key_sizes`,
+   `total_size`, `list_keys`.
 
 ## Findings during step 1
 
@@ -133,6 +174,19 @@ Legend: ✅ done · ⏳ in progress · ⬜ pending · ⛔ blocked
 - EC2 acceptance run: who runs it, and against which instance? Step 8c is gated on it.
 
 ## Log
+
+### 2026-09-23 — steps 2 and (part of) 3
+
+- `lib/backends/postgresql_textarray.sh`: PG18 specifics (pg_cli/pg_exec, metrics query,
+  preflight, comparison-DB restore, idle wait, init/close) + `backend::*` contract + new
+  `total_size` / `key_sizes` / `list_keys` / `size_expression` helpers.
+- `lib/registry.sh`: discovery, contract assertion, capability lookup.
+- `lib/config.sh`: layered configuration with `${VAR:-default}` knobs and a final
+  `config::derive_paths`; plus `conf/README.md`, `conf/db.postgresql.env.example`,
+  `conf/experiments/smoke.env.example`.
+- `experiment.sh`: single entry point; `--mode baseline` / `--instrument` rejected until
+  steps 6 and 8b. `experiment_postgresql_array-text-autovacuum.sh` is now a shim.
+- Suite: static checks PASS · 7 python tests OK · smoke PASS via both entry points.
 
 ### 2026-09-23 — step 1 complete
 
