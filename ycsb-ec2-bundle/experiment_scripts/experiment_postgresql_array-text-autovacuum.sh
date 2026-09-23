@@ -19,16 +19,16 @@ TARGET_TABLE="${TARGET_TABLE:-usertable}"
 DB_HOST="${DB_HOST:-127.0.0.1}"
 DB_PORT="${DB_PORT:-5432}"
 DB_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$DB_NAME"
-JDBC_PROPERTIES="../jdbc-binding/conf/postgres.properties"
-DB_USERNAME="ycsb"
-DB_PWD="usyd2026"
+JDBC_PROPERTIES="${JDBC_PROPERTIES:-../jdbc-binding/conf/postgres.properties}"
+DB_USERNAME="${DB_USERNAME:-ycsb}"
+DB_PWD="${DB_PWD:-usyd2026}"
 BACKUP_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$BACKUP_DB_NAME"
 BACKUP_FILE="./ycsb_dump.sql"
 UNCHANGED_DB_URL="jdbc:postgresql://$DB_HOST:$DB_PORT/$UNCHANGED_DB_NAME"
 
 # Change naming parameters here
-TYPE="postgresql_textarrays_autovacuum"
-YCSB_BINDING="jdbc-array"
+TYPE="${TYPE:-postgresql_textarrays_autovacuum}"
+YCSB_BINDING="${YCSB_BINDING:-jdbc-array}"
 SCALE="heavy" # "heavy" OR "light"
 EXTEND_DIST="zipfian" # "uniform" OR "zipfian"
 WORKLOAD="readonly-uniform" # e.g. "read-only-uniform" "mixed", "pure", or "spreadrun"
@@ -46,9 +46,9 @@ COMPARISON_INTERVAL=${COMPARISON_INTERVAL:-1}
 EXECUTION_ID="$(date -u +%Y%m%dT%H%M%SZ)_$$"
 
 # Define the workload file and the log file
-WORKLOAD_FILE="../workloads/workloadc-uniform-heavy"
+WORKLOAD_FILE="${WORKLOAD_FILE:-../workloads/workloadc-uniform-heavy}"
 EXPERIMENT_NAME="${TYPE}_${SCALE}_extend-${EXTEND_DIST}_${WORKLOAD}_run${RUN}"
-EXPERIMENT_DIR="../analysis/experiments/ycsb_${EXPERIMENT_NAME}"
+EXPERIMENT_DIR="${EXPERIMENT_DIR:-../analysis/experiments/ycsb_${EXPERIMENT_NAME}}"
 LOG_DIR="${EXPERIMENT_DIR}/logs"
 LOG_FILE="${LOG_DIR}/ycsb_${EXPERIMENT_NAME}_results.log"
 OUTPUT_CSV="${LOG_DIR}/${TYPE}_output.csv"
@@ -94,8 +94,8 @@ requestdistribution_postextend="uniform"
 readrequestdistribution_postextend="uniform"
 updaterequestdistribution_postextend="uniform"
 
-fieldlengthoriginal="100"
-extendoperationcount="100000"
+fieldlengthoriginal="${FIELDLENGTHORIGINAL:-100}"
+extendoperationcount="${EXTEND_OPERATIONCOUNT:-100000}"
 
 # Begin local PG18 support functions.
 PG_MAINTENANCE_DB="${PG_MAINTENANCE_DB:-postgres}"
@@ -458,6 +458,9 @@ finish_logging() {
 
     trap - EXIT ERR INT TERM
 
+    # Safety net: never leave a watcher behind, whatever killed the run.
+    stop_runtime_watcher
+
     # Prevent premature exits from being reported as successful.
     if (( rc == 0 )) && [[ "${EXPERIMENT_COMPLETED:-0}" != 1 ]]; then
         rc=1
@@ -489,41 +492,31 @@ wait_for_idle_postgres() {
     local database="${1:-$DB_NAME}"
     local interval="${2:-20}"
     local timeout="${3:-1200}"
-    local start active_backends active_count now
+    local started active_backends active_count
 
-	# wait for backend services (autovacuum, checkpointing) to finish
-	log "START WAIT FOR IDLE POSTGRES"
-	idle_wait_started=$SECONDS
-	start=$(date +%s)
-	while true; do
-		# Count connections that are NOT idle (excluding this script's connection)
-		# Variant 1: Count
-	    # active_count=$(pg_exec -d "$database" -At -c \
-       	#	"SELECT COUNT(*) FROM pg_stat_activity WHERE state != 'idle' AND pid != pg_backend_pid();")
-       	# active_count="${active_count//[[:space:]]/}"
-	    # if [[ "$active_count" == "0" ]]; then
-	    #     ...
-	    #    	if (( now - start >= timeout )); then
-        #    log "TIMEOUT WAIT FOR IDLE POSTGRES: $active_count backend(s) are still not idle."
-        #    break
-        #fi
-	    # 
-	    # Variant B: Details Count
-	    active_backends=$(pg_exec -d "$database" -At -c \
-       		"SELECT backend_type, query, query_start, wait_event, state FROM pg_stat_activity WHERE state != 'idle' AND pid != pg_backend_pid();")
-    	active_count=$(printf '%s\n' "$active_backends" | wc -l)
-	    if [[ "$active_count" == "0" ]]; then
-			log "END WAIT FOR IDLE POSTGRES duration=$((SECONDS-idle_wait_started))s"
-	       	break
-    	fi
-    	now=$(date +%s)
-    	if (( now - start >= timeout )); then
+    # Wait for backend services (autovacuum, checkpointing) to settle so that a
+    # phase is not timed while background work is still running.
+    log "START WAIT FOR IDLE POSTGRES database=$database"
+    started=$SECONDS
+    while true; do
+        # One row per non-idle backend, excluding this script's own connection.
+        active_backends=$(pg_exec -d "$database" -At -c \
+            "SELECT backend_type, query, query_start, wait_event, state FROM pg_stat_activity WHERE state != 'idle' AND pid != pg_backend_pid();")
+
+        # An empty result means idle. Do not count lines: printf '%s\n' "" | wc -l
+        # reports 1 for the empty string, so every wait ran to its full timeout.
+        if [[ -z "${active_backends//[[:space:]]/}" ]]; then
+            log "END WAIT FOR IDLE POSTGRES database=$database duration=$((SECONDS-started))s"
+            break
+        fi
+        active_count=$(printf '%s\n' "$active_backends" | grep -c .)
+        if (( SECONDS - started >= timeout )); then
             log "TIMEOUT WAIT FOR IDLE POSTGRES: $active_count backend(s) are still not idle: $(printf '%s' "$active_backends" | tr '\n' '\t')"
             break
         fi
-	    log "WAITING FOR IDLE POSTGRES - $active_count active processes: $(printf '%s' "$active_backends" | tr '\n' '\t')"
-    	sleep "$interval"
-	done	
+        log "WAITING FOR IDLE POSTGRES - $active_count active processes: $(printf '%s' "$active_backends" | tr '\n' '\t')"
+        sleep "$interval"
+    done
 }
 
 run_ycsb() {
@@ -551,18 +544,15 @@ run_ycsb() {
 
 # CPU and Memory watcher
 run_with_metrics() {
-    set +e
     local db_name=$1
     local phase=$2
     local epoch=$3
     local output_csv=$4
+    shift 4
+
+    local started=$SECONDS status=0 saved_traps=""
     local pg_1s_file=""
     local os_1s_file=""
-    local run_buffer_sampler_pid=""
-    local operation_count=""
-    local wal_start_lsn=""
-    local wal_end_lsn=""
-    shift 4
 
     metrics_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.metrics"
     db_stats_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.dbstats"
@@ -571,6 +561,10 @@ run_with_metrics() {
     mkdir -p "${LOG_DIR}"
     mkdir -p "${LOG_DIR}/javagc"
 
+    # Snapshot the runner's own traps so they survive this function; clearing
+    # them here used to remove finish_logging, so the log was never finalised.
+    saved_traps=$(trap -p EXIT INT TERM)
+    # shellcheck disable=SC2034  # re-assigned just before the watcher trap below
     # Start watcher
     setsid env \
         DB_PWD="$DB_PWD" \
@@ -588,25 +582,51 @@ run_with_metrics() {
         DB_STATS_INTERVAL="$DB_STATS_INTERVAL" \
         INTERVAL=1 \
         ./watcher.sh &
-    watcher_pid=$!
+    RUNTIME_WATCHER_PGID=$!
 
-    trap "kill -TERM -$watcher_pid 2>/dev/null" EXIT INT TERM
+    # Never leave the watcher's process group behind, even on interrupt.
+    saved_traps=$(trap -p EXIT INT TERM)
+    trap 'stop_runtime_watcher' EXIT INT TERM
 
-	# execute ycsb program including JAVA_OPTS to log garbage collector
+    # execute ycsb program including JAVA_OPTS to log garbage collector
     log "START YCSB $phase"
-	JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc-run${RUN}-${phase}-${epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
+    set +e
+    JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc-run${RUN}-${phase}-${epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
     "$@" > "$output_csv"
     status=$?
-    log "END YCSB $phase status=$rc duration=$((SECONDS-started))s"
-
-    # Stop watcher
-    kill -TERM -$watcher_pid 2>/dev/null
-    wait $watcher_pid 2>/dev/null
-
-    trap - EXIT INT TERM
-
-    echo "Finished $db_name phase=$phase epoch=$epoch (exit=$status)"
     set -e
+
+    stop_runtime_watcher
+
+    # Restore the runner's traps instead of clearing them.
+    if [[ -n "$saved_traps" ]]; then
+        eval "$saved_traps"
+    else
+        trap - EXIT INT TERM
+    fi
+
+    log "END YCSB $phase status=$status duration=$((SECONDS-started))s"
+    echo "Finished $db_name phase=$phase epoch=$epoch (exit=$status)"
+
+    # A failed phase must not be reported as a successful measurement.
+    if (( status != 0 )); then
+        log "ERROR YCSB $phase failed with status=$status; output=$output_csv"
+        return "$status"
+    fi
+    return 0
+}
+
+# Stops the watcher process group started by run_with_metrics. Global state and
+# always successful: it is called from EXIT/INT/TERM traps, where a non-zero
+# status would abort cleanup and a function-local pid would be out of scope.
+RUNTIME_WATCHER_PGID=""
+stop_runtime_watcher() {
+    local pid="${RUNTIME_WATCHER_PGID:-}"
+    RUNTIME_WATCHER_PGID=""
+    [[ -n "$pid" ]] || return 0
+    kill -TERM -"$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    return 0
 }
 
 # Initialize PostgreSQL database
@@ -769,10 +789,10 @@ log "END preflight"
 mkdir -p "$(dirname "$OUTPUT_FILE")" "$(dirname "$KEY_SIZE_FILE_AFTER_EXTEND")"
 
 # Clear the log file and previous backups
-> $PLAN_LOG
+> "$PLAN_LOG"
 > $HISTOGRAM_FILE
 
-rm -rf $KEY_SIZE_LOG
+rm -rf "$KEY_SIZE_LOG"
 rm -f "$KEY_SIZE_FILE_AFTER_EXTEND" "$KEY_SIZE_FILE_AFTER_RUN"
 
 initialize_database "$DB_NAME"
@@ -1256,7 +1276,7 @@ done
 # Delete intermediate temp files
 # rm -rf $LOG_FILE
 # rm -rf $OUTPUT_CSV
-# rm -rf $KEY_SIZE_LOG
+# rm -rf "$KEY_SIZE_LOG"
 
 log "=== All steps completed. Results are logged in $LOG_FILE ==="
 EXPERIMENT_COMPLETED=1

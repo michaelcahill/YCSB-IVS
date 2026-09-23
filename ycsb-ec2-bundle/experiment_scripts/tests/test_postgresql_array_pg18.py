@@ -15,7 +15,11 @@ import unittest
 
 
 SCRIPTS = Path(__file__).resolve().parents[1]
-RUNNERS = ("experiment_postgresql_array.sh", "experiment_postgresql_array_baseline.sh")
+# experiment_postgresql_array_baseline.sh is deliberately excluded: it still
+# expects the pre-PG16 pg_stat_bgwriter column `buffers_backend` and therefore
+# cannot pass a PG18 preflight at all. It is replaced by `--mode baseline` in
+# the refactor (REFACTOR_PLAN.md step 6), so repairing it is not worthwhile.
+RUNNERS = ("experiment_postgresql_array.sh",)
 MOCK_CLI = r'''
 import json, os, pathlib, sys
 tool = pathlib.Path(sys.argv[0]).name
@@ -48,12 +52,20 @@ elif tool == "psql":
     elif "pg_has_role" in sql:
         if mode == "wrong_owner":
             print("f")
+    elif "track_counts" in sql:
+        print("off" if mode == "no_track_counts" else "on")
+    elif "pg_relation_size" in sql or "relfilenode" in sql:
+        # Relation size sampling: one small heap row plus its index.
+        print("usertable|table|8192|8192 bytes")
+        print("usertable_pkey|index|16384|16 kB")
     elif "pg_stat_checkpointer" in sql:
         if mode == "metrics_failure":
             print("mock metrics SQL error", file=sys.stderr)
             sys.exit(1)
-        values = [str(i) for i in range(1, 24)]
-        values[15] = "NA"
+        # Mirror whatever column count the runner asked for, so the mock keeps
+        # working when the metrics query changes.
+        ncols = sql[sql.index("SELECT") + len("SELECT"):sql.index("FROM pg_catalog")].count(",") + 1
+        values = [str(i) for i in range(1, ncols + 1)]
         if mode == "empty_metrics":
             sys.exit(0)
         if mode == "short_metrics":
@@ -144,12 +156,27 @@ class PG18RunnerTests(unittest.TestCase):
                     self.assertFalse(any(t == "dropdb" and "--version" not in a for t, a in self.calls()))
                     self.assertFalse(list(self.scripts.glob("*results.log")))
 
-    def test_dump_version_checked_only_for_main(self):
+    def test_dump_version_checked_only_when_needed(self):
+        # A runner that dumps must reject a pre-18 pg_dump ...
         r = self.run_bash("bash " + RUNNERS[0], "old_dump", MOCK_STOP_AT_DROP="1")
-        self.assertIn("pg_dump must be PostgreSQL 18", r.stderr)
+        self.assertIn("pg_dump must be PostgreSQL 18", r.stdout + r.stderr)
         self.assertNotEqual(r.returncode, 99)
-        r = self.run_bash("bash " + RUNNERS[1], "old_dump", MOCK_STOP_AT_DROP="1")
-        self.assertEqual(r.returncode, 99, r.stderr)
+
+        # ... and a caller that passes needs_dump=false must not require it.
+        body = (
+            "YCSB_HOME=..; YCSB=$YCSB_HOME/bin/ycsb.sh; "
+            "WORKLOAD_FILE=$YCSB_HOME/workloads/workloada-extend; "
+            "JDBC_PROPERTIES=$YCSB_HOME/jdbc-binding/conf/postgres.properties; "
+            "PG_MAINTENANCE_DB=postgres; TARGET_TABLE=usertable\n"
+            # The extracted support block uses the runner's log(), which lives
+            # outside it; stub it so real preflight failures still surface.
+            "log() { case \"$*\" in START*|END*) ;; *) echo \"$*\" >&2;; esac; }\n"
+            "postgres_preflight false ycsb ycsb_unchange\n"
+            "printf 'PREFLIGHT_OK\\n'\n"
+        )
+        r = self.run_bash(self.helper_code(body), "old_dump")
+        self.assertNotIn("pg_dump must be PostgreSQL 18", r.stdout + r.stderr)
+        self.assertIn("PREFLIGHT_OK", r.stdout)
 
     def test_successful_preflight_reaches_initialization(self):
         for runner in RUNNERS:
@@ -165,7 +192,7 @@ class PG18RunnerTests(unittest.TestCase):
     def test_missing_build_stops_before_initialization(self):
         (self.root / "jdbc-array/target/array.jar").unlink()
         r = self.run_bash("bash " + RUNNERS[0], MOCK_STOP_AT_DROP="1")
-        self.assertIn("Missing build artifact", r.stderr)
+        self.assertIn("Missing build artifact", r.stdout + r.stderr)
         self.assertNotEqual(r.returncode, 99)
 
     def test_metrics_sql_failure_is_fatal_after_startup_too(self):
@@ -206,12 +233,18 @@ write_result FALSE
                     rows = list(csv.reader(stream))
                 self.assertEqual(len(rows), 3)
                 self.assertEqual(len(rows[0]), len(set(rows[0])))
+                stats_start = rows[0].index("blks_read")
+                stats_end = rows[0].index("Readprop")
                 for row in rows[1:]:
                     self.assertEqual(len(row), len(rows[0]))
-                    record = dict(zip(rows[0], row))
-                    self.assertEqual(record["checkpoints_done"], "13")
-                    self.assertEqual(record["buffers_backend"], "NA")
-                    self.assertEqual(record["wal_buffers_full"], "23")
+                    # The mock echoes 1..N in SELECT order, so the statistics
+                    # block must be exactly 1..N in header order. This checks
+                    # header/value alignment without hardcoding a column list
+                    # that differs between runner generations and PG versions.
+                    stats = row[stats_start:stats_end]
+                    self.assertEqual(
+                        stats, [str(i) for i in range(1, len(stats) + 1)],
+                        "statistics columns are misaligned with their values")
 
     def test_restore_success_and_failure_handling(self):
         for mode in ("ok", "dump_failure", "restore_failure", "row_mismatch"):

@@ -1,0 +1,94 @@
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] START experiment execution=<EXECUTION_ID> host=127.0.0.1 port=<N>
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] Log file: <WORKDIR>/experiment/logs/ycsb_smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1_results.log
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] Result CSV: <WORKDIR>/experiment/data/workload_data/smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1.csv
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] START preflight
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] START statistics snapshot database=postgres scope=global
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] END statistics snapshot database=postgres statistics=<N> relsizes=<N>
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] END preflight
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] Initializing PostgreSQL database ycsb_smoke...
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] Done initializing ycsb_smoke.
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] Initializing PostgreSQL database ycsb_smoke_unch...
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] Done initializing ycsb_smoke_unch.
+[<TIMESTAMP>] Starting metrics collection for ycsb_smoke
+[<TIMESTAMP>] [epoch=0 run=0 phase=load] START YCSB load
+[<TIMESTAMP>] [epoch=0 run=0 phase=load] END YCSB load status=0 duration=<N>s
+[<TIMESTAMP>] Finished ycsb_smoke phase=load epoch=0 (exit=0)
+[<TIMESTAMP>] [epoch=0 run=0 phase=load] START statistics snapshot database=ycsb_smoke scope=all
+[<TIMESTAMP>] [epoch=0 run=0 phase=load] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=0 run=0 phase=load] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=0 run=0 phase=load] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=0 run=0 phase=load] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=0 run=0 phase=load] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=0 run=0 phase=load] END statistics snapshot database=ycsb_smoke statistics=<N> relsizes=<N>
+[<TIMESTAMP>] Starting metrics collection for ycsb_smoke_unch
+[<TIMESTAMP>] [epoch=0 run=0 phase=reference-load] START YCSB reference-load
+[<TIMESTAMP>] [epoch=0 run=0 phase=reference-load] END YCSB reference-load status=0 duration=<N>s
+[<TIMESTAMP>] Finished ycsb_smoke_unch phase=reference-load epoch=0 (exit=0)
+[<TIMESTAMP>] Starting metrics collection for ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] START YCSB extend
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] END YCSB extend status=0 duration=<N>s
+[<TIMESTAMP>] Finished ycsb_smoke phase=extend epoch=1 (exit=0)
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] START statistics snapshot database=ycsb_smoke scope=all
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] END statistics snapshot database=ycsb_smoke statistics=<N> relsizes=<N>
+[<TIMESTAMP>] Starting metrics collection for ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] START YCSB run
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] END YCSB run status=0 duration=<N>s
+[<TIMESTAMP>] Finished ycsb_smoke phase=run epoch=1 (exit=0)
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] START statistics snapshot database=ycsb_smoke scope=all
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] END statistics snapshot database=ycsb_smoke statistics=<N> relsizes=<N>
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] START WAIT FOR IDLE POSTGRES database=ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s
+[<TIMESTAMP>] Starting metrics collection for ycsb_smoke_unch
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] START YCSB reference
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] END YCSB reference status=0 duration=<N>s
+[<TIMESTAMP>] Finished ycsb_smoke_unch phase=reference epoch=1 (exit=0)
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] START statistics snapshot database=ycsb_smoke_unch scope=all
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] END statistics snapshot database=ycsb_smoke_unch statistics=<N> relsizes=<N>
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] Backing up the database started
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] Backing up the database finished
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] START WAIT FOR IDLE POSTGRES database=ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s
+[<TIMESTAMP>] Starting metrics collection for ycsb_smoke_bak
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] START YCSB clean-run
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] END YCSB clean-run status=0 duration=<N>s
+[<TIMESTAMP>] Finished ycsb_smoke_bak phase=clean-run epoch=1 (exit=0)
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] START statistics snapshot database=ycsb_smoke_bak scope=all
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] END statistics snapshot database=ycsb_smoke_bak statistics=<N> relsizes=<N>
+[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] START YCSB comparison-load
+[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] END YCSB comparison-load status=0 duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] START WAIT FOR IDLE POSTGRES database=ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s
+[<TIMESTAMP>] Starting metrics collection for ycsb_smoke_bak
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] START YCSB avg-run
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END YCSB avg-run status=0 duration=<N>s
+[<TIMESTAMP>] Finished ycsb_smoke_bak phase=avg-run epoch=1 (exit=0)
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] START statistics snapshot database=ycsb_smoke_bak scope=all
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] DB statistics <METRICS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END statistics snapshot database=ycsb_smoke_bak statistics=<N> relsizes=<N>
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END experiment status=0 duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] Download this log from EC2: <WORKDIR>/experiment/logs/ycsb_smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1_results.log
