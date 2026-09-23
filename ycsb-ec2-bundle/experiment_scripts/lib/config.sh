@@ -155,10 +155,11 @@ ALIASES
     return 0
 }
 
-# Legacy knobs that belong to the full-visibility instrumentation module (step 8b).
-# They are recognised so a stale launcher fails with a clear message instead of
-# silently running without its instrumentation.
-config::warn_deferred_legacy() {
+# Legacy knobs of the array_json full-visibility instrumentation. That observability is
+# discarded rather than deferred (REFACTOR_PLAN.md §4), so experiment.sh has no code path for
+# it — but a stale launcher is told its settings are ignored instead of silently running
+# without them. The jsonb schema itself is a backend: ./experiment.sh postgresql_json.
+config::warn_discarded_legacy() {
     local name value ignored=()
     for name in REQUIRE_FULL_VISIBILITY SAMPLE_INTERVAL_SECONDS \
                 RELATION_SIZE_SAMPLE_INTERVAL_SECONDS DETOAST_PROBE_ENABLED \
@@ -169,10 +170,11 @@ config::warn_deferred_legacy() {
         [[ -z "$value" ]] || ignored+=("$name")
     done
     (( ${#ignored[@]} == 0 )) && return 0
-    echo "[config] WARNING: instrumentation variables are not supported by experiment.sh yet:" >&2
+    echo "[config] WARNING: instrumentation variables are ignored by experiment.sh:" >&2
     printf '[config]            %s\n' "${ignored[@]}" >&2
-    echo "[config]            they land with the postgresql_fullview module (REFACTOR_PLAN.md step 8b);" >&2
-    echo "[config]            until then use experiment_postgresql_array_json.sh for full-visibility runs." >&2
+    echo "[config]            their samplers were dropped by design (REFACTOR_PLAN.md §4), not deferred;" >&2
+    echo "[config]            the jsonb schema is ./experiment.sh postgresql_json, and full visibility lives" >&2
+    echo "[config]            only in run_postgresql_array_json_full_visibility.sh until step 8c." >&2
     return 0
 }
 

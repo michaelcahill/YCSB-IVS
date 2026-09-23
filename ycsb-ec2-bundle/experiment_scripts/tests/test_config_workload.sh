@@ -249,6 +249,29 @@ workload::generate bogus-phase 1 >/dev/null 2>&1 && bad "unknown phase must fail
 
 # shellcheck source=lib/registry.sh
 source "$SCRIPTS_DIR/lib/registry.sh"
+
+# Old launcher names must keep resolving, must resolve to exactly one backend, and must not
+# enlarge the list of backends. `postgresql_array` is the TEXT[] schema (as it was before the
+# jsonb variant existed), which is why the jsonb aliases are listed separately.
+eq "alias postgresql_array" "$(registry::alias postgresql_array)" "postgresql_textarray"
+eq "alias postgresql" "$(registry::alias postgresql)" "postgresql_row"
+eq "alias array_json" "$(registry::alias array_json)" "postgresql_json"
+eq "alias jsonb" "$(registry::alias jsonb)" "postgresql_json"
+eq "alias innodb" "$(registry::alias innodb)" "mariadb_innodb"
+eq "unknown name passes through" "$(registry::alias nosuchbackend)" "nosuchbackend"
+for alias_name in postgresql_array jsonb innodb; do
+    if [[ " $(registry::available) " == *" $alias_name "* ]]; then
+        bad "alias '$alias_name' must not be advertised as a backend"
+    else
+        ok
+    fi
+done
+# An alias may only point at something that exists; rocksdb is allowed to fail with the
+# standard "unknown backend" message, so it is checked for resolution rather than success.
+[[ -f "$(registry::resolve jsonb 2>/dev/null)" ]] && ok || bad "alias jsonb does not resolve to a file"
+registry::resolve rocksdb >/dev/null 2>&1 && bad "rocksdb resolves before its backend exists" || ok
+registry::resolve _postgresql_common >/dev/null 2>&1 && bad "shared modules are not backends" || ok
+
 for backend in $(registry::available); do
     if (set -euo pipefail; source "$BACKENDS_DIR/$backend.sh"; while read -r fn; do
             declare -F "$fn" >/dev/null || { echo "missing $fn in $backend" >&2; exit 1; }

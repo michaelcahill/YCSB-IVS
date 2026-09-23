@@ -51,6 +51,8 @@ Usage: ./experiment.sh <backend> [options]
 Backends:
 $(registry::available | sed 's/^/  /')
 
+Old names still resolve (postgresql_array, jsonb, innodb, ...) and print a deprecation line.
+
 Options:
   --config FILE       load KEY=VALUE configuration from FILE before running
   --var KEY=VALUE     override a single configuration variable
@@ -107,10 +109,6 @@ while (($#)); do
             # Baseline mode lands with REFACTOR_PLAN.md step 6.
             [[ "${2:-mainline}" == mainline ]] || { echo "[error] --mode ${2} is not implemented yet" >&2; exit 2; }
             shift 2 ;;
-        --instrument)
-            # Instrumentation modules land with REFACTOR_PLAN.md step 8b.
-            [[ "${2:-none}" == none ]] || { echo "[error] --instrument is not implemented yet" >&2; exit 2; }
-            shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --check) CHECK_ONLY=1; shift ;;
         -*) echo "[error] unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -139,7 +137,7 @@ fi
 # Old launcher variable names (DIST, WORK, EXPERIMENT_EPOCHS, …) are translated after
 # the files, so a preset can never shadow what a launcher exported.
 config::apply_legacy_aliases
-config::warn_deferred_legacy
+config::warn_discarded_legacy
 
 if (( ${#VAR_OVERRIDES[@]} )); then
     for assignment in "${VAR_OVERRIDES[@]}"; do

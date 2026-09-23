@@ -50,8 +50,11 @@ db_available() {
 # reports SKIP otherwise - so the list can name backends whose server is a container that is
 # not always up. Backends in $REQUIRED_BACKEND_SMOKES additionally fail the suite under
 # REQUIRE_DB=1, because there their absence means something broke.
-BACKEND_SMOKES="${BACKEND_SMOKES:-postgresql_row postgrenosql mariadb_innodb mongodb neo4j couchbase}"
-REQUIRED_BACKEND_SMOKES="${REQUIRED_BACKEND_SMOKES:-postgresql_row postgrenosql}"
+# postgresql_textarray is deliberately not listed: the authoritative smoke run above is a
+# textarray run compared against goldens, so it would only duplicate that coverage.
+BACKEND_SMOKES="${BACKEND_SMOKES:-postgresql_row postgresql_json postgrenosql mariadb_innodb mongodb neo4j couchbase}"
+# The PostgreSQL family shares one server here, so its absence means something broke.
+REQUIRED_BACKEND_SMOKES="${REQUIRED_BACKEND_SMOKES:-postgresql_row postgresql_json postgrenosql}"
 
 run_backend_smoke() {
     local backend="$1" out reason

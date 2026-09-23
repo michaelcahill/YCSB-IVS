@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
+#
+# FROZEN (REFACTOR_PLAN.md §4, step 8c). This runner is the record of the full-visibility
+# experiments; its ~2.7k lines of WAL / pg_stat_statements / buffer-residency / pg_prewarm /
+# checkpoint-log / read-sampling / detoast instrumentation are deliberately NOT ported to the
+# refactored harness, and it is kept runnable (with run_postgresql_array_json_full_visibility.sh
+# and benchmark_observability.py) only until the EC2 confirmation that releases step 8c.
+#
+# What survived of it is the jsonb data model: for a jsonb-array run on the standard phase
+# loop, watcher, statistics columns and results CSV use
+#
+#   ./experiment.sh postgresql_json [options]        # lib/backends/postgresql_json.sh
+#
+# `--variant text_array` and `--variant text_scalar` correspond to ./experiment.sh
+# postgresql_textarray and postgresql_row. Exact legacy bytes: `git worktree add
+# ../pre-refactor pre-refactor-scripts`.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
