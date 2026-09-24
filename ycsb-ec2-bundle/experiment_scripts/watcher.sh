@@ -66,6 +66,9 @@ prev_total_disk_io_ms=""
 prev_total_disk_weighted_io_ms=""
 DISK_RATES_RESULT=""
 
+prev_cpu_total_jiffies=""
+prev_cpu_iowait_jiffies=""
+
 csv_escape() {
     local value="${1:-}"
     value=${value//\"/\"\"}
@@ -144,7 +147,8 @@ write_os_1s_header() {
         printf ',postgres_cpu_pct,postgres_rss_kb,mem_available_kb,mem_dirty_kb,mem_writeback_kb'
         printf ',disk_reads_s,disk_writes_s,disk_read_kb_s,disk_write_kb_s,disk_await_ms,disk_aqu_sz,disk_util_pct'
         printf ',disk_device_set,disk_device_source'
-        printf ',total_disk_reads_s,total_disk_writes_s,total_disk_read_kb_s,total_disk_write_kb_s,total_disk_await_ms,total_disk_aqu_sz,total_disk_util_pct\n'
+        printf ',total_disk_reads_s,total_disk_writes_s,total_disk_read_kb_s,total_disk_write_kb_s,total_disk_await_ms,total_disk_aqu_sz,total_disk_util_pct'
+        printf ',cpu_iowait_pct,psi_io_some_avg10,psi_io_some_avg60,psi_io_some_total_us,psi_io_full_avg10\n'
     } > "$OS_1S_FILE"
 }
 
@@ -668,6 +672,84 @@ collect_disk_rates_for_devices() {
     printf -v "$prev_weighted_io_ms_var" '%s' "$weighted_io_ms"
 }
 
+collect_cpu_iowait_totals() {
+    # /proc/stat cpu line: user nice system idle iowait irq softirq steal ...
+    awk '/^cpu / {
+        total = $2 + $3 + $4 + $5 + $6 + $7 + $8 + $9
+        printf "%d,%d", total, $6
+        found = 1
+    } END {
+        if (!found) printf "NULL,NULL"
+    }' /proc/stat
+}
+
+# Percentage of CPU time stalled on block I/O since the previous call.
+collect_cpu_iowait_pct() {
+    local now_totals total iowait elapsed delta
+
+    now_totals=$(collect_cpu_iowait_totals)
+    IFS=, read -r total iowait <<< "$now_totals"
+
+    if [ -z "$now_totals" ] || [ "$total" = "NULL" ]; then
+        printf 'NULL'
+        return
+    fi
+
+    if [ -z "$prev_cpu_total_jiffies" ] || [ -z "$prev_cpu_iowait_jiffies" ]; then
+        prev_cpu_total_jiffies=$total
+        prev_cpu_iowait_jiffies=$iowait
+        printf '0.000'
+        return
+    fi
+
+    elapsed=$((total - prev_cpu_total_jiffies))
+    delta=$((iowait - prev_cpu_iowait_jiffies))
+    [ "$elapsed" -le 0 ] && elapsed=1
+    [ "$delta" -lt 0 ] && delta=0
+
+    prev_cpu_total_jiffies=$total
+    prev_cpu_iowait_jiffies=$iowait
+
+    awk -v elapsed="$elapsed" -v delta="$delta" '
+        BEGIN { printf "%.3f", delta * 100.0 / elapsed }
+    '
+}
+
+# Pressure-stall information for block I/O: some avg10,avg60,total_us and full avg10.
+collect_psi_io() {
+    if [ ! -r /proc/pressure/io ]; then
+        printf 'NULL,NULL,NULL,NULL'
+        return
+    fi
+
+    awk '
+        function kv(line, key,    n, fields, pair, i) {
+            n = split(line, fields, " ")
+            for (i = 2; i <= n; i++) {
+                if (split(fields[i], pair, "=") == 2 && pair[1] == key) return pair[2]
+            }
+            return ""
+        }
+        /^some / { some_line = $0 }
+        /^full / { full_line = $0 }
+        END {
+            if (some_line == "") {
+                printf "NULL,NULL,NULL,NULL"
+            } else {
+                printf "%s,%s,%s,%s",
+                    kv(some_line, "avg10") + 0,
+                    kv(some_line, "avg60") + 0,
+                    kv(some_line, "total") + 0,
+                    (full_line == "" ? 0 : kv(full_line, "avg10")) + 0
+            }
+        }
+    ' /proc/pressure/io
+}
+
+collect_os_iowait() {
+    printf '%s,%s' "$(collect_cpu_iowait_pct)" "$(collect_psi_io)"
+}
+
 # PostgreSQL I/O totals for the phase; empty for any other dialect, which the caller turns
 # into NULL columns.
 collect_pg_io_totals_guarded() {
@@ -827,7 +909,7 @@ while true; do
         selected_disk_rates="$DISK_RATES_RESULT"
         collect_disk_rates_for_devices "$OS_DISK_TOTAL_DEVICES" "total"
         total_disk_rates="$DISK_RATES_RESULT"
-        echo "$db_name,$phase,$epoch,$ts_ms,$cpu,$mem_kb,$(collect_meminfo),$selected_disk_rates,$OS_DISK_SELECTION_LABEL,$OS_DISK_SELECTION_SOURCE,$total_disk_rates" >> "$OS_1S_FILE"
+        echo "$db_name,$phase,$epoch,$ts_ms,$cpu,$mem_kb,$(collect_meminfo),$selected_disk_rates,$OS_DISK_SELECTION_LABEL,$OS_DISK_SELECTION_SOURCE,$total_disk_rates,$(collect_os_iowait)" >> "$OS_1S_FILE"
     fi
     if [ "$DB_STATS_ENABLED" = 1 ] && [ "$DB_STATS_INTERVAL" -gt 0 ] &&
         [ $((ts - last_db_stats)) -ge "$DB_STATS_INTERVAL" ]; then
