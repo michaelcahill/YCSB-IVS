@@ -76,9 +76,18 @@ run_with_metrics() {
     local started=$SECONDS status=0 saved_traps=""
     local pg_1s_file=""
     local os_1s_file=""
+    local os_disk_device_file=""
 
     metrics_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.metrics"
     db_stats_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.dbstats"
+    # Per-second host sampling: the .osstats rates CSV (disk rates, CPU iowait, block-I/O
+    # pressure stall information) and the .diskstats record of which devices those rates cover.
+    # Both are read from /proc only, so every backend gets them; OS_STATS_ENABLED=0 skips the
+    # sampler's per-phase files (the .metrics summary is always written).
+    if [[ "${OS_STATS_ENABLED:-1}" == 1 ]]; then
+        os_1s_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.osstats"
+        os_disk_device_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.diskstats"
+    fi
 
     echo "Starting metrics collection for $db_name"
     mkdir -p "${LOG_DIR}"
@@ -99,7 +108,7 @@ run_with_metrics() {
         DB_STATS_FILE="$db_stats_file" \
         PG_1S_FILE="$pg_1s_file" \
         OS_1S_FILE="$os_1s_file" \
-        OS_DISK_DEVICE_FILE="" \
+        OS_DISK_DEVICE_FILE="$os_disk_device_file" \
         OS_DISK_DEVICES="$OS_DISK_DEVICES" \
         DB_STATS_TABLE="$TARGET_TABLE" \
         DB_DIALECT="${RUNTIME_DB_DIALECT:-}" \
@@ -424,7 +433,10 @@ run_comparison_phases() {
     phase="clean-run"
 
     log "Backing up the database started"
-    RESTORE_LOG="./${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_step${step}_restore.log"
+    # Under $LOG_DIR (not the current directory): a run's artefacts are all in one place, and
+    # dump_restore expects the directory to exist before it writes the log.
+    RESTORE_LOG="$LOG_DIR/restore_logs/${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_step${step}_restore.log"
+    mkdir -p "$(dirname "$RESTORE_LOG")"
     backend::dump_restore
     log "Backing up the database finished"
 

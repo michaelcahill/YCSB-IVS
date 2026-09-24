@@ -87,7 +87,8 @@ cp conf/db.postgresql.env.example conf/db.postgresql_textarray.env   # endpoint 
 - Anything can be set with `--var KEY=VALUE`; common knobs: `TYPE`, `RUN`,
   `EXTEND_DIST` (zipfian|uniform), `WORKLOAD` (name part, e.g. `readonly-uniform`),
   `VACUUM_ENABLED`, `COMPARISON_INTERVAL` (0 disables the comparison phases in
-  mainline), `DB_NAME`/`UNCHANGED_DB_NAME`/`BACKUP_DB_NAME`, `EXPERIMENT_DIR`.
+  mainline), `DB_NAME`/`UNCHANGED_DB_NAME`/`BACKUP_DB_NAME`, `EXPERIMENT_DIR`,
+  `OS_STATS_ENABLED` (0 skips the per-second `.osstats`/`.diskstats` files).
 - Workload files are **read-only templates** (`../workloads/`). Every phase gets an
   immutable, provenance-tagged copy under `$EXPERIMENT_DIR/workloads/`; a run never
   writes to `workloads/`.
@@ -204,6 +205,7 @@ Live: `tmux capture-pane -t ycsb:0.0 -p -S -40`. After (or during) completion, w
 ```bash
 tail "$EXP/logs/"*_results.log          # must end with: END experiment status=0
 grep -c 'START YCSB' "$EXP/logs/"*_results.log   # phases executed
+ls "$EXP/logs/"*.osstats | wc -l        # one per-second I/O sample per measured phase
 head -2 "$EXP/data/workload_data/"*.csv # one row per measured phase, standard columns
 ls "$EXP/data/value_size_data/"         # value sizes before/after extend (mainline: 2 files)
 ls "$EXP/logs/histogram.txt"
@@ -229,6 +231,10 @@ Everything goes under one experiment directory
 │   ├── <name>_query_plan.log            # single-key query plans (PostgreSQL family)
 │   ├── <db>_<name>_<phase>.metrics      # per-phase OS metrics
 │   ├── <db>_<name>_<phase>.dbstats      # per-phase database statistics (PostgreSQL dialect)
+│   ├── <db>_<name>_<phase>.osstats      # per-second rates: disk, CPU iowait, PSI (OS_STATS_ENABLED)
+│   ├── <db>_<name>_<phase>.diskstats    # which devices those rates cover
+│   ├── restore_logs/                    # dump/restore of the comparison database, per iteration
+│   ├── vacuum_logs/                     # raw VACUUM (ANALYZE, VERBOSE) output, per phase
 │   └── javagc/                          # YCSB JVM GC logs
 ├── data/
 │   ├── workload_data/<name>.csv         # the results CSV (analysis input)

@@ -390,8 +390,12 @@ backend::truncate() {
 backend::vacuum() {
     local db="${1:?database required}"
     local vacuum_started=$SECONDS vacuum_rc=0
-    local vacuum_detail="${LOG_FILE%.log}_iteration${iteration}_epoch${epoch}_step${step}_vacuum.raw.log"
+    # One directory per kind of artefact, so a run log's neighbours stay readable; the name is
+    # derived from LOG_FILE with pure expansion (no subshell in the declaration).
+    local vacuum_run_name="${LOG_FILE##*/}"
+    local vacuum_detail="$LOG_DIR/vacuum_logs/${vacuum_run_name%.log}_iteration${iteration}_epoch${epoch}_step${step}_vacuum.raw.log"
 
+    mkdir -p "$(dirname "$vacuum_detail")"
     log "START VACUUM ANALYZE database=$db"
 
     backend::exec -d "$db" \

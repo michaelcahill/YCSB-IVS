@@ -188,6 +188,10 @@ config::init_defaults() {
     # --- watcher.sh parameters -------------------------------------------------
     DB_STATS_INTERVAL="${DB_STATS_INTERVAL:-60}"
     OS_DISK_DEVICES="${OS_DISK_DEVICES:-auto}"
+    # Per-second host sampling (watcher.sh): the .osstats rates CSV, whose columns include the
+    # block-I/O and pressure-stall numbers, plus the .diskstats device-selection record. It is
+    # /proc-only, so it costs one sampler per phase for every backend; 0 writes neither file.
+    OS_STATS_ENABLED="${OS_STATS_ENABLED:-1}"
 }
 
 # Derive every path from the experiment identity. Must run AFTER all configuration
