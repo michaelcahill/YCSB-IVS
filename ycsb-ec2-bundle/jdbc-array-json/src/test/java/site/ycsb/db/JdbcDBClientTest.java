@@ -290,8 +290,63 @@ public class JdbcDBClientTest {
     }
   }
 
+  /*
+     The jsonb `||` pushdown needs PostgreSQL, so on HSQLDB every extend takes the
+     client-side path whichever way extend.serverside is set. That path is element-aware:
+     it adds a new array element (it does not concatenate onto the last one), and it counts
+     the delimiter when it applies maxfieldlength - exactly like the pushdown.
+   */
   @Test
   public void extendTest() throws SQLException {
+    String insertKey = "user0";
+    HashMap<String, ByteIterator> insertMap = insertRow(insertKey);
+    Map<String, ByteIterator> extendMap = new HashMap<String, ByteIterator>();
+    extendMap.put("FIELD1", new StringByteIterator("extended"));
+
+    // Append only while the value stays under maxfieldlength (see the boundary test).
+    assertEquals(Status.OK, jdbcDBClient.extend(TABLE_NAME, insertKey, extendMap, 1000));
+
+    ResultSet resultSet = jdbcConnection.prepareStatement(
+        String.format("SELECT FIELD1 FROM %s WHERE %s = '%s'", TABLE_NAME, KEY_FIELD, insertKey)).executeQuery();
+    assertTrue(resultSet.next());
+    assertEquals("The element is appended, not concatenated onto the last one",
+        asStoredJson(insertMap.get("FIELD1").toString(), "extended"), resultSet.getString("FIELD1"));
+    resultSet.close();
+
+    Set<String> readFields = new HashSet<String>();
+    readFields.add("FIELD1");
+    HashMap<String, ByteIterator> readResultMap = new HashMap<String, ByteIterator>();
+    jdbcDBClient.read(TABLE_NAME, insertKey, readFields, readResultMap);
+    assertEquals(insertMap.get("FIELD1").toString() + ",extended", readResultMap.get("FIELD1").toString());
+  }
+
+  @Test
+  public void extendCountsTheDelimiterAtTheLimitTest() throws SQLException {
+    String insertKey = "user0";
+    HashMap<String, ByteIterator> insertMap = insertRow(insertKey);
+    Map<String, ByteIterator> extendMap = new HashMap<String, ByteIterator>();
+    extendMap.put("FIELD1", new StringByteIterator("extended"));
+
+    // 32 characters stored + 1 delimiter + 8 appended is 41: not below a limit of 41.
+    assertEquals(Status.OK, jdbcDBClient.extend(TABLE_NAME, insertKey, extendMap, 41));
+    ResultSet resultSet = jdbcConnection.prepareStatement(
+        String.format("SELECT FIELD1 FROM %s WHERE %s = '%s'", TABLE_NAME, KEY_FIELD, insertKey)).executeQuery();
+    assertTrue(resultSet.next());
+    assertEquals("An append that would reach the limit is skipped",
+        asStoredJson(insertMap.get("FIELD1").toString()), resultSet.getString("FIELD1"));
+    resultSet.close();
+
+    // One more character of headroom and the very same append goes through.
+    assertEquals(Status.OK, jdbcDBClient.extend(TABLE_NAME, insertKey, extendMap, 42));
+    resultSet = jdbcConnection.prepareStatement(
+        String.format("SELECT FIELD1 FROM %s WHERE %s = '%s'", TABLE_NAME, KEY_FIELD, insertKey)).executeQuery();
+    assertTrue(resultSet.next());
+    assertEquals(asStoredJson(insertMap.get("FIELD1").toString(), "extended"), resultSet.getString("FIELD1"));
+    resultSet.close();
+  }
+
+  @Test
+  public void extendStopsAtMaxFieldLengthTest() throws SQLException {
     String insertKey = "user0";
     HashMap<String, ByteIterator> insertMap = insertRow(insertKey);
     Map<String, ByteIterator> extendMap = new HashMap<String, ByteIterator>();
@@ -302,14 +357,20 @@ public class JdbcDBClientTest {
     ResultSet resultSet = jdbcConnection.prepareStatement(
         String.format("SELECT FIELD1 FROM %s WHERE %s = '%s'", TABLE_NAME, KEY_FIELD, insertKey)).executeQuery();
     assertTrue(resultSet.next());
-    assertEquals(asStoredJson(insertMap.get("FIELD1").toString(), "extended"), resultSet.getString("FIELD1"));
+    assertEquals("An over-limit field is left untouched",
+        asStoredJson(insertMap.get("FIELD1").toString()), resultSet.getString("FIELD1"));
     resultSet.close();
+  }
 
-    Set<String> readFields = new HashSet<String>();
-    readFields.add("FIELD1");
-    HashMap<String, ByteIterator> readResultMap = new HashMap<String, ByteIterator>();
-    jdbcDBClient.read(TABLE_NAME, insertKey, readFields, readResultMap);
-    assertEquals(insertMap.get("FIELD1").toString() + ",extended", readResultMap.get("FIELD1").toString());
+  @Test
+  public void extendMissingKeyTest() throws SQLException {
+    insertRow("user0");
+    Map<String, ByteIterator> extendMap = new HashMap<String, ByteIterator>();
+    extendMap.put("FIELD1", new StringByteIterator("extended"));
+
+    assertEquals(Status.NOT_FOUND, jdbcDBClient.extend(TABLE_NAME, "nosuchkey", extendMap, 1000));
+    assertEquals(Status.BAD_REQUEST,
+        jdbcDBClient.extend(TABLE_NAME, "user0", new HashMap<String, ByteIterator>(), 1000));
   }
 
   @Test

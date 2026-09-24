@@ -105,6 +105,8 @@ public class JdbcDBClient extends DB {
   private String arrayDelimiterRegex;
   private String arrayElementType;
   private boolean postgresArrayAppend;
+  /** True (default) to append inside the database, false to use DB.extend(). */
+  private boolean extendServerSide;
   private static final String DEFAULT_PROP = "";
   private ConcurrentMap<StatementType, PreparedStatement> cachedStatements;
   private long numRowsInBatch = 0;
@@ -208,6 +210,8 @@ public class JdbcDBClient extends DB {
     this.arrayDelimiter = props.getProperty(ARRAY_DELIMITER, ",");
     this.arrayDelimiterRegex = Pattern.quote(arrayDelimiter);
     this.arrayElementType = props.getProperty(ARRAY_ELEMENT_TYPE, "text");
+    this.extendServerSide = getBoolProperty(props, EXTEND_SERVER_SIDE_PROPERTY,
+        EXTEND_SERVER_SIDE_PROPERTY_DEFAULT);
     this.pendingBatchArrays = new HashMap<>();
 
     try {
@@ -239,6 +243,11 @@ public class JdbcDBClient extends DB {
       final String[] urlArr = urls.split(";");
       if (urlArr.length > 0) {
         postgresArrayAppend = urlArr[0].startsWith("jdbc:postgresql");
+      }
+      if (extendServerSide && !postgresArrayAppend) {
+        System.err.println("Server-side extend needs array_append(), only supported on PostgreSQL;"
+            + " falling back to the client-side DB.extend (pass -p " + EXTEND_SERVER_SIDE_PROPERTY
+            + "=false to silence this).");
       }
       for (String url : urlArr) {
         System.out.println("Adding shard node URL: " + url);
@@ -461,77 +470,93 @@ public class JdbcDBClient extends DB {
     }
   }
 
+  /**
+   * Extend one field of a record.
+   *
+   * <p>Two implementations, selected by {@code -p extend.serverside} (default
+   * {@code true}):
+   * <ul>
+   * <li><b>server side</b> - one {@code array_append()} UPDATE adds the element in
+   * the database; only the new element travels. Requires PostgreSQL.</li>
+   * <li><b>client side</b> - {@link #extendInClient}: read, join one element on,
+   * update. Deliberately not {@code DB.extend}, whose text concatenation would grow the
+   * last element instead of adding one.</li>
+   * </ul>
+   *
+   * <p>Both paths add exactly one element and both apply the same limit: the append
+   * happens only while the value stays under {@code maxfieldlength}, measured on the value
+   * as {@link #read} renders it (the elements joined by {@code jdbc.array.delimiter}) -
+   * the quantity {@code DB.extend} itself compares. So the modes leave identical data.
+   */
   @Override
   public Status extend(String tableName, String key, Map<String, ByteIterator> values, long maxfieldlength) {
     if (values == null || values.isEmpty()) {
       return Status.BAD_REQUEST;
     }
+
+    if (!extendServerSide || !postgresArrayAppend) {
+      return extendInClient(tableName, key, values, maxfieldlength);
+    }
+
     Map.Entry<String, ByteIterator> entry = values.entrySet().iterator().next();
     String field = entry.getKey();
-    String element = entry.getValue().toString();
+    String element = entry.getValue() == null ? "" : entry.getValue().toString();
+    String quotedDelimiter = arrayDelimiter.replace("'", "''");
 
-    try {
-      if (postgresArrayAppend) {
-        String sql = "UPDATE " + tableName + " SET " + field + " = array_append(" + field
-            + ", ?) WHERE " + PRIMARY_KEY + " = ?";
-        try (PreparedStatement stmt = getShardConnectionByKey(key).prepareStatement(sql)) {
-          stmt.setString(1, element);
-          stmt.setString(2, key);
-          int result = stmt.executeUpdate();
-          if (result == 1) {
-            return Status.OK;
-          }
-          return Status.UNEXPECTED_STATE;
-        }
+    // The CASE guards on the length the value would have after the append, which is what
+    // the client-side path compares; array_to_string over the appended array reproduces
+    // exactly what read() returns. Two parameters because the element appears in both the
+    // guard and the assignment.
+    String sql = "UPDATE " + tableName + " SET " + field + " = CASE WHEN length(array_to_string("
+        + "array_append(" + field + ", ?), '" + quotedDelimiter + "')) < " + maxfieldlength
+        + " THEN array_append(" + field + ", ?) ELSE " + field + " END WHERE " + PRIMARY_KEY + " = ?";
+    try (PreparedStatement stmt = getShardConnectionByKey(key).prepareStatement(sql)) {
+      stmt.setString(1, element);
+      stmt.setString(2, element);
+      stmt.setString(3, key);
+      int result = stmt.executeUpdate();
+      if (result == 1) {
+        return Status.OK;
       }
-
-      Connection conn = getShardConnectionByKey(key);
-      String selectSql = "SELECT " + field + " FROM " + tableName + " WHERE " + PRIMARY_KEY + " = ?";
-      try (PreparedStatement selectStmt = conn.prepareStatement(selectSql)) {
-        selectStmt.setString(1, key);
-        try (ResultSet resultSet = selectStmt.executeQuery()) {
-          if (!resultSet.next()) {
-            return Status.NOT_FOUND;
-          }
-          String[] existing = new String[0];
-          Array array = resultSet.getArray(1);
-          if (array != null) {
-            try {
-              Object arrayObject = array.getArray();
-              if (arrayObject instanceof Object[]) {
-                Object[] valuesArray = (Object[]) arrayObject;
-                existing = new String[valuesArray.length];
-                for (int i = 0; i < valuesArray.length; i++) {
-                  existing[i] = String.valueOf(valuesArray[i]);
-                }
-              }
-            } finally {
-              array.free();
-            }
-          }
-          String[] next = Arrays.copyOf(existing, existing.length + 1);
-          next[existing.length] = element;
-          String updateSql = "UPDATE " + tableName + " SET " + field + " = ? WHERE " + PRIMARY_KEY + " = ?";
-          try (PreparedStatement updateStmt = conn.prepareStatement(updateSql)) {
-            Array jdbcArray = conn.createArrayOf(arrayElementType, next);
-            try {
-              updateStmt.setArray(1, jdbcArray);
-              updateStmt.setString(2, key);
-              int result = updateStmt.executeUpdate();
-              if (result == 1) {
-                return Status.OK;
-              }
-              return Status.UNEXPECTED_STATE;
-            } finally {
-              jdbcArray.free();
-            }
-          }
-        }
-      }
+      return Status.NOT_FOUND;
     } catch (SQLException e) {
       System.err.println("Error in processing extend to table: " + tableName + e);
       return Status.ERROR;
     }
+  }
+
+  /**
+   * Client-side extend, element-aware.
+   *
+   * <p>Not {@code super.extend}: {@code DB.extend} concatenates text, and this binding's
+   * {@link #read}/{@link #update} move an array as its delimiter-joined text, so plain
+   * concatenation would grow the <em>last element</em> instead of adding a new one - the
+   * two implementations would then leave different data. Joining the element on here is
+   * what {@code update()} splits back into an appended array element.
+   */
+  private Status extendInClient(String tableName, String key, Map<String, ByteIterator> values,
+      long maxfieldlength) {
+    Map.Entry<String, ByteIterator> entry = values.entrySet().iterator().next();
+    String field = entry.getKey();
+    String element = entry.getValue() == null ? "" : entry.getValue().toString();
+
+    HashMap<String, ByteIterator> readResult = new HashMap<>();
+    Status status = read(tableName, key, Collections.singleton(field), readResult);
+    if (status != Status.OK) {
+      return status;
+    }
+
+    ByteIterator current = readResult.get(field);
+    String joined = current == null ? "" : current.toString();
+    String next = joined.isEmpty() ? element : joined + arrayDelimiter + element;
+    if (next.length() >= maxfieldlength) {
+      // Same rule as DB.extend: an over-limit field is left untouched, and that is OK.
+      return Status.OK;
+    }
+
+    Map<String, ByteIterator> extended = new HashMap<>();
+    extended.put(field, new StringByteIterator(next));
+    return update(tableName, key, extended);
   }
 
   @Override

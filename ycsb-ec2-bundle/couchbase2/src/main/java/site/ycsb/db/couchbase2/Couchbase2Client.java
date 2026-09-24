@@ -121,6 +121,8 @@ public class Couchbase2Client extends DB {
   private long kvTimeout;
   private boolean adhoc;
   private boolean kv;
+  /** True (default) to append inside the server, false to use DB.extend(). */
+  private boolean extendServerSide;
   private int maxParallelism;
   private String host;
   private int kvEndpoints;
@@ -145,6 +147,7 @@ public class Couchbase2Client extends DB {
     syncMutResponse = props.getProperty("couchbase.syncMutationResponse", "true").equals("true");
     adhoc = props.getProperty("couchbase.adhoc", "false").equals("true");
     kv = props.getProperty("couchbase.kv", "true").equals("true");
+    extendServerSide = isServerSideExtend(props);
     maxParallelism = Integer.parseInt(props.getProperty("couchbase.maxParallelism", "1"));
     kvEndpoints = Integer.parseInt(props.getProperty("couchbase.kvEndpoints", "1"));
     queryEndpoints = Integer.parseInt(props.getProperty("couchbase.queryEndpoints", "1"));
@@ -227,6 +230,7 @@ public class Couchbase2Client extends DB {
     sb.append(", syncMutResponse=").append(syncMutResponse);
     sb.append(", adhoc=").append(adhoc);
     sb.append(", kv=").append(kv);
+    sb.append(", extendServerSide=").append(extendServerSide);
     sb.append(", maxParallelism=").append(maxParallelism);
     sb.append(", queryEndpoints=").append(queryEndpoints);
     sb.append(", kvEndpoints=").append(kvEndpoints);
@@ -397,6 +401,24 @@ public class Couchbase2Client extends DB {
     return Status.OK;
   }
 
+  /**
+   * Extend one field of a document.
+   *
+   * <p>Two implementations, selected by {@code -p extend.serverside} (default
+   * {@code true}):
+   * <ul>
+   * <li><b>server side</b> - {@link #extendInDatabase}: one N1QL UPDATE appends the
+   * value inside the cluster, so the field being grown never reaches the client.
+   * This deliberately uses the query service even when {@code couchbase.kv=true},
+   * because the KV protocol can only append to the raw document (which would corrupt
+   * the stored JSON object), not to one of its attributes.</li>
+   * <li><b>client side</b> - {@link DB#extend(String, String, Map, long)}: read,
+   * concatenate here, write back; it goes through read()/update(), so it honours
+   * {@code couchbase.kv} and needs no query service.</li>
+   * </ul>
+   * Both append if and only if {@code len(current) + len(append) < maxfieldlength},
+   * so they leave identical data.
+   */
   @Override
   public Status extend(final String table, final String key, final Map<String, ByteIterator> values,
       final long maxfieldlength) {
@@ -404,88 +426,53 @@ public class Couchbase2Client extends DB {
       return Status.BAD_REQUEST;
     }
 
+    if (!extendServerSide) {
+      // Client-side extend: read/concatenate/update through the generic interface.
+      return super.extend(table, key, values, maxfieldlength);
+    }
+
     try {
       String docId = formatId(table, key);
       Map.Entry<String, ByteIterator> entry = values.entrySet().iterator().next();
       String field = entry.getKey();
       String appendValue = entry.getValue() == null ? "" : entry.getValue().toString();
-
-      if (kv) {
-        return extendKv(docId, field, appendValue, maxfieldlength);
-      } else {
-        return extendN1ql(docId, field, appendValue, maxfieldlength);
-      }
+      return extendInDatabase(docId, field, appendValue, maxfieldlength);
     } catch (Exception ex) {
       ex.printStackTrace();
       return Status.ERROR;
     }
   }
 
-  private Status extendKv(final String docId, final String field, final String appendValue,
-      final long maxfieldlength) {
-    RawJsonDocument loaded = bucket.get(docId, RawJsonDocument.class);
-    if (loaded == null) {
-      return Status.NOT_FOUND;
-    }
+  /**
+   * Server-side extend: the whole read-modify-write is one N1QL statement.
+   *
+   * <p>The CASE reproduces {@link DB#extend(String, String, Map, long)} exactly -
+   * append only while the field stays under {@code maxfieldlength}, otherwise write
+   * the field back unchanged. The increment length and the limit are known here, so
+   * they go into the statement as literals and only the increment and the document id
+   * are parameters. {@code RETURNING} tells a missing document (no row) from an
+   * existing one whose append was skipped.
+   *
+   * <p>{@code CONCAT(...)} is used rather than the {@code ||} operator because N1QL
+   * treats {@code ||} as logical OR in ANSI query mode, which would store a boolean,
+   * and {@code COALESCE} rather than {@code IFNULL} because {@code IFNULL} only covers
+   * NULL - a MISSING attribute has to fall back to the empty string too, otherwise the
+   * CASE evaluates to MISSING and deletes the attribute. Both verified against a live
+   * cluster; see EXTEND_STATUS.md.
+   */
+  private Status extendInDatabase(final String docId, final String field, final String appendValue,
+      final long maxfieldlength) throws DBException {
+    String quotedField = "`" + field.replace("`", "``") + "`";
 
-    JsonObject content = JsonObject.fromJson(loaded.content());
-    String currentValue = content.getString(field);
-    if (currentValue == null) {
-      currentValue = "";
-    }
+    String updateQuery = "UPDATE `" + bucketName + "` USE KEYS [$1] SET " + quotedField + " = CASE"
+        + " WHEN LENGTH(COALESCE(" + quotedField + ", \"\")) + " + appendValue.length()
+        + " < " + maxfieldlength
+        + " THEN CONCAT(COALESCE(" + quotedField + ", \"\"), $2)"
+        + " ELSE " + quotedField + " END RETURNING META().id";
 
-    String nextValue = currentValue + appendValue;
-    if (maxfieldlength >= 0 && nextValue.length() > maxfieldlength) {
-      nextValue = nextValue.substring(0, (int) maxfieldlength);
-    }
-
-    content.put(field, nextValue);
-    waitForMutationResponse(bucket.async().replace(
-        RawJsonDocument.create(docId, documentExpiry, content.toString()),
-        persistTo,
-        replicateTo
-    ));
-    return Status.OK;
-  }
-
-  private Status extendN1ql(final String docId, final String field, final String appendValue,
-      final long maxfieldlength) throws Exception {
-    String escapedField = field.replace("`", "``");
-    String quotedField = "`" + escapedField + "`";
-
-    String readQuery = "SELECT " + quotedField + " FROM `" + bucketName + "` USE KEYS [$1]";
-    N1qlQueryResult readResult = bucket.query(N1qlQuery.parameterized(
-        readQuery,
-        JsonArray.from(docId),
-        N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
-    ));
-
-    if (!readResult.parseSuccess() || !readResult.finalSuccess()) {
-      throw new DBException("Error while parsing N1QL Result. Query: " + readQuery
-          + ", Errors: " + readResult.errors());
-    }
-
-    N1qlQueryRow row;
-    try {
-      row = readResult.rows().next();
-    } catch (NoSuchElementException ex) {
-      return Status.NOT_FOUND;
-    }
-
-    JsonObject rowValue = row.value();
-    JsonObject bucketScoped = rowValue.getObject(bucketName);
-    Object existing = bucketScoped != null ? bucketScoped.get(field) : rowValue.get(field);
-    String currentValue = existing == null ? "" : existing.toString();
-
-    String nextValue = currentValue + appendValue;
-    if (maxfieldlength >= 0 && nextValue.length() > maxfieldlength) {
-      nextValue = nextValue.substring(0, (int) maxfieldlength);
-    }
-
-    String updateQuery = "UPDATE `" + bucketName + "` USE KEYS [$1] SET " + quotedField + " = $2";
     N1qlQueryResult updateResult = bucket.query(N1qlQuery.parameterized(
         updateQuery,
-        JsonArray.from(docId, nextValue),
+        JsonArray.from(docId, appendValue),
         N1qlParams.build().adhoc(adhoc).maxParallelism(maxParallelism)
     ));
 
@@ -493,7 +480,9 @@ public class Couchbase2Client extends DB {
       throw new DBException("Error while parsing N1QL Result. Query: " + updateQuery
           + ", Errors: " + updateResult.errors());
     }
-    return Status.OK;
+
+    // An UPDATE ... USE KEYS on a missing document yields no RETURNING row.
+    return updateResult.rows().hasNext() ? Status.OK : Status.NOT_FOUND;
   }
 
   @Override

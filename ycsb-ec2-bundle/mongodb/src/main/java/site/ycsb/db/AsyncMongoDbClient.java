@@ -34,6 +34,7 @@ import com.allanbank.mongodb.bson.ElementType;
 import com.allanbank.mongodb.bson.builder.BuilderFactory;
 import com.allanbank.mongodb.bson.builder.DocumentBuilder;
 import com.allanbank.mongodb.bson.element.BinaryElement;
+import com.allanbank.mongodb.bson.element.StringElement;
 import com.allanbank.mongodb.builder.BatchedWrite;
 import com.allanbank.mongodb.builder.BatchedWriteMode;
 import com.allanbank.mongodb.builder.Find;
@@ -42,6 +43,7 @@ import site.ycsb.ByteIterator;
 import site.ycsb.DB;
 import site.ycsb.DBException;
 import site.ycsb.Status;
+import site.ycsb.StringByteIterator;
 
 import java.util.HashMap;
 import java.util.Iterator;
@@ -82,6 +84,9 @@ public class AsyncMongoDbClient extends DB {
 
   /** The write concern for the requests. */
   private static final AtomicInteger INIT_COUNT = new AtomicInteger(0);
+
+  /** Whether the "no server-side extend here" notice has been printed yet. */
+  private static boolean warnedClientSideExtendOnly = false;
 
   /** The connection to MongoDB. */
   private static MongoClient mongoClient;
@@ -258,7 +263,7 @@ public class AsyncMongoDbClient extends DB {
           DOCUMENT_BUILDER.get().reset().add("_id", key);
       final Document query = toInsert.build();
       for (final Map.Entry<String, ByteIterator> entry : values.entrySet()) {
-        toInsert.add(entry.getKey(), entry.getValue().toArray());
+        toInsert.add(entry.getKey(), entry.getValue().toString());
       }
 
       // Do an upsert.
@@ -458,7 +463,7 @@ public class AsyncMongoDbClient extends DB {
       final DocumentBuilder fieldsToSet = update.push("$set");
 
       for (final Map.Entry<String, ByteIterator> entry : values.entrySet()) {
-        fieldsToSet.add(entry.getKey(), entry.getValue().toArray());
+        fieldsToSet.add(entry.getKey(), entry.getValue().toString());
       }
       final long res =
           collection.update(query, update, false, false, writeConcern);
@@ -480,11 +485,36 @@ public class AsyncMongoDbClient extends DB {
   protected final void fillMap(final Map<String, ByteIterator> result,
       final Document queryResult) {
     for (final Element be : queryResult) {
-      if (be.getType() == ElementType.BINARY) {
+      if (be.getType() == ElementType.STRING) {
+        // What this binding writes now.
+        result.put(be.getName(),
+            new StringByteIterator(((StringElement) be).getValue()));
+      } else if (be.getType() == ElementType.BINARY) {
+        // Written by an older version of this binding.
         result.put(be.getName(),
             new BinaryByteArrayIterator((BinaryElement) be));
       }
     }
+  }
+
+  /**
+   * Always the client-side {@link DB#extend} - read, concatenate here, write back.
+   *
+   * <p>There is no server-side variant in this binding: the async driver sends update
+   * documents rather than aggregation pipelines, so MongoDB has nothing to append with on
+   * the server. The synchronous {@code mongodb} binding does have a pushdown; see its
+   * README. Overridden only to say so once instead of leaving {@code extend.serverside}
+   * silently ineffective here.
+   */
+  @Override
+  public Status extend(final String table, final String key,
+      final Map<String, ByteIterator> values, final long maxfieldlength) {
+    if (!warnedClientSideExtendOnly) {
+      warnedClientSideExtendOnly = true;
+      System.err.println("mongodb-async has no server-side extend (its driver sends update "
+          + "documents, not aggregation pipelines); using the client-side DB.extend.");
+    }
+    return super.extend(table, key, values, maxfieldlength);
   }
 
   /**

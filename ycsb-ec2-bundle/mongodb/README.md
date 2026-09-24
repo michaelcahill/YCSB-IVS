@@ -157,3 +157,43 @@ For example:
 To run with the synchronous driver from MongoDB Inc.:
 
     ./bin/ycsb load mongodb -s -P workloads/workloada -p mongodb.url=mongodb://localhost:27017/ycsb?w=0
+
+## Extend operation: client-side vs server-side
+
+`extend` appends to a field, growing it. Two implementations, selected by
+`extend.serverside` (default `true`):
+
+```sh
+extend.serverside=true    # server side: one aggregation-pipeline update
+extend.serverside=false   # client side: DB.extend() - read, concatenate here, update
+```
+
+Server-side, the append happens inside MongoDB so the value being grown never travels to the
+client - one request instead of read + write:
+
+```javascript
+db.collection.updateOne({_id: key}, [{$set: {field1: {$cond: [
+    {$lt: [{$add: [{$strLenCP: {$ifNull: ["$field1", ""]}}, <append length>]}, <maxfieldlength>]},
+    {$concat: [{"$ifNull": ["$field1", ""]}, <append value>]},
+    {$ifNull: ["$field1", ""]}]}}}])
+```
+
+Like every other binding, both modes append if and only if
+`len(current) + len(append) < maxfieldlength`, never truncate, and report `NOT_FOUND` only for
+a missing document (an append that would cross the limit is skipped and still reports `OK`).
+Verified against MongoDB 5.0.33: append, cap-skip at the exact boundary, missing document,
+empty values (`BAD_REQUEST`), client-vs-server equivalence and a 20 KB increment.
+
+Two things this required, worth knowing when reading results:
+
+* **Fields are stored as strings.** They used to be BSON Binary (`ByteIterator.toArray()`), and
+  MongoDB cannot concatenate binary - an aggregation-pipeline update answers
+  `$concat only supports strings, not binData` (measured on 5.0). `insert()`/`update()` now
+  write `ByteIterator.toString()`, and `read()` decodes strings (it still converts `Binary` for
+  documents written before the switch). `$strLenCP` counts code points where Java counts UTF-16
+  units; they agree for the printable-ASCII payloads YCSB generates.
+* **`mongodb-async` has no pushdown.** The allanbank driver sends update documents rather than
+  aggregation pipelines, so that binding always uses `DB.extend` (it stores strings too) and
+  prints that once at the first extend.
+
+Background in `../EXTEND_STATUS.md`.

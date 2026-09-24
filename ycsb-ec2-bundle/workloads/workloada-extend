@@ -32,3 +32,9 @@ extendproportion=0
 requestdistribution=uniform
 extendfieldlength=100
 fieldlength=100
+
+# Where the append of an extend happens: true (the default) lets the binding push it
+# into the database as one statement; false uses the client-side DB.extend - read the
+# field, concatenate in this JVM, write the whole value back. Both obey
+# maxfieldlength. See EXTEND_PLAN.md for the per-binding notes.
+#extend.serverside=true

@@ -62,3 +62,28 @@ The following command runs the workload and uses the configuration defined in th
 .\bin\ycsb run postgrenosql -P .\workloads\workloada -P .\postgrenosql\conf\postgrenosql.properties
 
 
+
+## Extend operation (`extend.serverside`)
+
+`extend` appends a value to one field of the JSON document, up to the `maxfieldlength` cap.
+Two implementations:
+
+```sh
+extend.serverside=true        # default: append inside PostgreSQL
+extend.serverside=false       # client side: DB.extend() - read, concatenate here, update
+```
+
+The server-side implementation (default) does the whole read-modify-write in one statement,
+so the field being grown never leaves the server:
+
+```sql
+UPDATE usertable SET YCSB_VALUE = jsonb_set(YCSB_VALUE, '{field1}', to_jsonb(CASE
+    WHEN length(coalesce(YCSB_VALUE->>'field1', '')) + <append length> < <maxfieldlength>
+    THEN coalesce(YCSB_VALUE->>'field1', '') || COALESCE(?, '')
+    ELSE coalesce(YCSB_VALUE->>'field1', '') END), true)
+  WHERE YCSB_KEY = ?
+```
+
+Both implementations append if and only if `len(current) + len(append) < maxfieldlength`, so
+they leave identical data: a field at or over the limit is rewritten unchanged (`OK`) and only
+a missing key reports `NOT_FOUND`. Verified against PostgreSQL 18 in both modes.
