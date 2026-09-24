@@ -33,6 +33,8 @@ trap 'rm -rf "$TMP"' EXIT
 # The tests below assert what a preset file applies, so the canonical names it sets must
 # not be inherited from whoever runs the suite.
 unset TYPE SCALE RUN EXTEND_DIST EMPTY_OK
+# The synonym tests below need the canonical names unset, in either spelling.
+unset NUM_EPOCHS STEPS_PER_EPOCH WORKLOAD EPOCHS RUNS_PER_EPOCH EXTENDOPERATIONCOUNT DIST WORK
 
 # --- configuration files ------------------------------------------------------
 
@@ -99,12 +101,49 @@ EOF
 out="$(config::load_file "$TMP/eval.env" 2>&1)" && bad "command substitution must be rejected" || ok
 has "config is not executed" "$out" "substitution"
 
-# --- legacy launcher aliases: gone (step 8c) ------------------------------------
+# --- legacy launcher aliases: gone (step 8c); master's names are synonyms ----------
 
-# The DIST/WORK/EXPERIMENT_EPOCHS-style variable shim and the deprecated backend-name
-# aliases existed to keep pre-refactor launchers working. The EC2 acceptance run used the
-# rewritten runbook, step 8c deleted the legacy scripts, and with them both shims: an old
-# name must now fail loudly instead of silently running something.
+# The deprecated backend-name aliases were deleted at step 8c: an old backend spelling must fail
+# loudly instead of silently running something else. The *variable* names the last pre-refactor
+# runners used (master's EPOCHS/RUNS_PER_EPOCH/EXTENDOPERATIONCOUNT/DIST/WORK) are kept as
+# synonyms, because they only size an experiment and never choose what runs: the same invocation
+# line must keep describing the same experiment.
+# Fold-in only: what does each name end up as?
+synonym_fold() {
+    (
+        set -euo pipefail
+        config::apply_legacy_names || exit 1
+        printf '%s|%s|%s|%s\n' "${NUM_EPOCHS:-unset}" "${STEPS_PER_EPOCH:-unset}" \
+            "${EXTEND_DIST:-unset}" "${WORKLOAD:-unset}"
+    ) 2>/dev/null
+}
+eq "master's names fold into the canonical ones" \
+    "$(EPOCHS=3 RUNS_PER_EPOCH=4 DIST=uniform WORK=mixed synonym_fold)" "3|4|uniform|mixed"
+eq "the canonical name always wins over its synonym" \
+    "$(EPOCHS=3 NUM_EPOCHS=9 WORK=old WORKLOAD=new synonym_fold)" "9|unset|unset|new"
+eq "nothing set leaves the canonical names unset" "$(synonym_fold)" "unset|unset|unset|unset"
+
+# End to end: config::init_defaults applies the fold before any default reads a canonical name,
+# so an environment written against master sizes the run exactly as that script did.
+master_sized() {
+    (
+        set -euo pipefail
+        backend::default_config() { :; }
+        registry::info() { printf '\n'; }
+        TYPE=t SCALE=light RUN=1
+        config::init_defaults || exit 1
+        printf '%s|%s|%s\n' "$NUM_EPOCHS" "$STEPS_PER_EPOCH" "$extendoperationcount"
+    ) 2>/dev/null
+}
+eq "a master-style environment sizes the run" \
+    "$(EPOCHS=5 RUNS_PER_EPOCH=2 EXTENDOPERATIONCOUNT=77 master_sized)" "5|2|77"
+eq "the canonical defaults are unchanged" "$(master_sized)" "10|10|100000"
+
+# Using a synonym is reported, so a run log always says which name produced the size.
+note="$( (EPOCHS=3; export EPOCHS; config::apply_legacy_names) 2>&1 >/dev/null)"
+has "a synonym reports what it set" "$note" "EPOCHS=3 is a synonym for NUM_EPOCHS=3"
+
+# --- experiment mode ----------------------------------------------------------
 
 # --- experiment mode ----------------------------------------------------------
 

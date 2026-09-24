@@ -89,6 +89,11 @@ cp conf/db.postgresql.env.example conf/db.postgresql_textarray.env   # endpoint 
   `VACUUM_ENABLED`, `COMPARISON_INTERVAL` (0 disables the comparison phases in
   mainline), `DB_NAME`/`UNCHANGED_DB_NAME`/`BACKUP_DB_NAME`, `EXPERIMENT_DIR`,
   `OS_STATS_ENABLED` (0 skips the per-second `.osstats`/`.diskstats` files).
+- The names the last pre-refactor runners used are accepted as synonyms of the canonical
+  ones, so an old invocation line still runs the same experiment: `EPOCHS` → `NUM_EPOCHS`,
+  `RUNS_PER_EPOCH` → `STEPS_PER_EPOCH`, `EXTENDOPERATIONCOUNT` → `EXTEND_OPERATIONCOUNT`,
+  `DIST` → `EXTEND_DIST`, `WORK` → `WORKLOAD`. The canonical name always wins, and using a
+  synonym is reported as `[config] EPOCHS=3 is a synonym for NUM_EPOCHS=3`.
 - Workload files are **read-only templates** (`../workloads/`). Every phase gets an
   immutable, provenance-tagged copy under `$EXPERIMENT_DIR/workloads/`; a run never
   writes to `workloads/`.

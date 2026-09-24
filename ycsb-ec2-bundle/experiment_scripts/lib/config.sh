@@ -95,7 +95,36 @@ config::load_layered_files() {
     return 0
 }
 
+# Synonyms for the variable names used by the last pre-refactor runners (the postgrenosql and
+# array-text experiment scripts on master). They are accepted so an old invocation line still
+# describes the same experiment; the canonical name always wins, so `--var`, a preset or the
+# environment setting NUM_EPOCHS is never overruled by EPOCHS. Unlike the deleted backend-name
+# aliases these names never select *what* runs, only how large it is.
+config::apply_legacy_names() {
+    local -A legacy_names=(
+        [EPOCHS]=NUM_EPOCHS                       # master: epochs
+        [RUNS_PER_EPOCH]=STEPS_PER_EPOCH          # master: steps per epoch
+        [EXTENDOPERATIONCOUNT]=EXTEND_OPERATIONCOUNT
+        [DIST]=EXTEND_DIST                        # master: extend request distribution
+        [WORK]=WORKLOAD                           # master: workload name part
+    )
+    local legacy canonical
+    for legacy in "${!legacy_names[@]}"; do
+        canonical="${legacy_names[$legacy]}"
+        [[ -z "${!legacy:-}" ]] && continue       # not given under the old name either
+        [[ -n "${!canonical:-}" ]] && continue    # canonical name already set: it wins
+        printf -v "$canonical" '%s' "${!legacy}"
+        # shellcheck disable=SC2163  # the canonical name is what we export
+        export "$canonical"
+        echo "[config] $legacy=${!legacy} is a synonym for $canonical=${!canonical}" >&2
+    done
+    return 0
+}
+
 config::init_defaults() {
+    # Old (master) names are folded in before any default reads a canonical name.
+    config::apply_legacy_names
+
     # Connection / schema settings come from the backend.
     backend::default_config
 
