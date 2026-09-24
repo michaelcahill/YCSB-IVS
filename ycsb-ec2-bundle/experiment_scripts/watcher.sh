@@ -98,7 +98,7 @@ write_db_stats_header() {
     {
         printf 'Phase,Epoch,Timestamp'
         printf ',numbackends,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes'
-        printf ',checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time'
+        printf ',buffers_clean,buffers_alloc,checkpoints_timed,checkpoints_req,buffers_checkpoint,checkpoint_write_time,checkpoint_sync_time'
         printf ',wal_records,wal_fpi,wal_bytes,wal_buffers_full'
         printf ',heap_bytes,heap_total_bytes,toast_heap_bytes,toast_total_bytes,toast_index_bytes'
         printf ',n_live_tup,n_dead_tup,n_tup_ins,n_tup_upd,n_tup_hot_upd,vacuum_count,autovacuum_count\n'
@@ -114,7 +114,7 @@ write_pg_1s_header() {
     {
         printf 'DBName,Phase,Epoch,TimestampUnixMs'
         printf ',numbackends,blks_read,blks_hit,tup_returned,tup_fetched,tup_inserted,tup_updated,tup_deleted,deadlocks,temp_files,temp_bytes'
-        printf ',checkpoints_timed,checkpoints_req,buffers_checkpoint,buffers_clean,buffers_backend,buffers_alloc,checkpoint_write_time,checkpoint_sync_time'
+        printf ',buffers_clean,buffers_alloc,checkpoints_timed,checkpoints_req,buffers_checkpoint,checkpoint_write_time,checkpoint_sync_time'
         printf ',wal_records,wal_fpi,wal_bytes,wal_buffers_full'
         printf ',heap_bytes,heap_total_bytes,toast_heap_bytes,toast_total_bytes,toast_index_bytes'
         printf ',n_live_tup,n_dead_tup,n_tup_ins,n_tup_upd,n_tup_hot_upd,vacuum_count,autovacuum_count'
@@ -155,7 +155,7 @@ write_os_disk_device_header() {
 }
 
 collect_db_stats() {
-    local db_stats bgwriter_stats wal_stats relation_stats table_stats
+    local db_stats bgwriter_stats checkpointer_stats wal_stats relation_stats table_stats
 
     db_stats=$(psql_csv postgres "
         SELECT numbackends, blks_read, blks_hit, tup_returned, tup_fetched,
@@ -167,12 +167,20 @@ collect_db_stats() {
     [ -z "$db_stats" ] && db_stats=$(null_csv 11)
 
     bgwriter_stats=$(psql_csv postgres "
-        SELECT checkpoints_timed, checkpoints_req, buffers_checkpoint,
-               buffers_clean, buffers_backend, buffers_alloc,
-               checkpoint_write_time, checkpoint_sync_time
+        SELECT buffers_clean, buffers_alloc
         FROM pg_stat_bgwriter;
     ")
-    [ -z "$bgwriter_stats" ] && bgwriter_stats=$(null_csv 8)
+    [ -z "$bgwriter_stats" ] && bgwriter_stats=$(null_csv 2)
+
+    checkpointer_stats=$(psql_csv postgres "
+        SELECT num_timed AS checkpoints_timed,
+               num_requested AS checkpoints_req,
+               buffers_written AS buffers_checkpoint,
+               write_time AS checkpoint_write_time,
+               sync_time AS checkpoint_sync_time
+        FROM pg_stat_checkpointer;
+    ")
+    [ -z "$checkpointer_stats" ] && checkpointer_stats=$(null_csv 5)
 
     wal_stats=$(psql_csv postgres "
         SELECT wal_records, wal_fpi, wal_bytes, wal_buffers_full
@@ -222,7 +230,7 @@ collect_db_stats() {
     ")
     [ -z "$table_stats" ] && table_stats=$(null_csv 7)
 
-    printf '%s,%s,%s,%s,%s' "$db_stats" "$bgwriter_stats" "$wal_stats" "$relation_stats" "$table_stats"
+    printf '%s,%s,%s,%s,%s,%s' "$db_stats" "$bgwriter_stats" "$checkpointer_stats" "$wal_stats" "$relation_stats" "$table_stats"
 }
 
 collect_wait_stats() {
@@ -736,69 +744,12 @@ collect_os_iowait() {
 }
 
 collect_pg_io_totals() {
-    local totals
-
-    totals=$(psql_csv postgres "
-        WITH settings AS (
-            SELECT current_setting('block_size')::bigint AS block_size
-        ),
-        db AS (
-            SELECT COALESCE(blks_read, 0)::bigint AS blks_read,
-                   COALESCE(temp_bytes, 0)::bigint AS temp_bytes
-            FROM pg_stat_database
-            WHERE datname = :'watch_db'
-        ),
-        bgwriter AS (
-            SELECT COALESCE(buffers_checkpoint, 0)::bigint AS buffers_checkpoint,
-                   COALESCE(buffers_clean, 0)::bigint AS buffers_clean,
-                   COALESCE(buffers_backend, 0)::bigint AS buffers_backend
-            FROM pg_stat_bgwriter
-        ),
-        wal AS (
-            SELECT COALESCE(wal_bytes, 0)::numeric::bigint AS wal_bytes
-            FROM pg_stat_wal
-        )
-        SELECT (db.blks_read * settings.block_size)::bigint,
-               (
-                   wal.wal_bytes
-                   + ((bgwriter.buffers_checkpoint + bgwriter.buffers_clean + bgwriter.buffers_backend) * settings.block_size)
-                   + db.temp_bytes
-               )::bigint
-        FROM settings
-        CROSS JOIN db
-        CROSS JOIN bgwriter
-        CROSS JOIN wal;
-    ")
-
-    if [ -z "$totals" ]; then
-        totals=$(psql_csv postgres "
-            WITH settings AS (
-                SELECT current_setting('block_size')::bigint AS block_size
-            ),
-            db AS (
-                SELECT COALESCE(blks_read, 0)::bigint AS blks_read,
-                       COALESCE(temp_bytes, 0)::bigint AS temp_bytes
-                FROM pg_stat_database
-                WHERE datname = :'watch_db'
-            ),
-            bgwriter AS (
-                SELECT COALESCE(buffers_checkpoint, 0)::bigint AS buffers_checkpoint,
-                       COALESCE(buffers_clean, 0)::bigint AS buffers_clean,
-                       COALESCE(buffers_backend, 0)::bigint AS buffers_backend
-                FROM pg_stat_bgwriter
-            )
-            SELECT (db.blks_read * settings.block_size)::bigint,
-                   (
-                       ((bgwriter.buffers_checkpoint + bgwriter.buffers_clean + bgwriter.buffers_backend) * settings.block_size)
-                       + db.temp_bytes
-                   )::bigint
-            FROM settings
-            CROSS JOIN db
-            CROSS JOIN bgwriter;
-        ")
-    fi
-
-    printf '%s' "$totals"
+    psql_csv postgres "
+        SELECT COALESCE(sum(read_bytes), 0)::bigint,
+               (COALESCE(sum(write_bytes), 0)
+                + COALESCE(sum(extend_bytes), 0))::bigint
+        FROM pg_stat_io;
+    "
 }
 
 is_integer() {
