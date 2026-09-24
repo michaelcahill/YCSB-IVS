@@ -75,3 +75,16 @@ You can set the following properties (with the default settings applied):
  - couchbase.stale => How to deal with stale values in View Query for scanning. (OK, FALSE, UPDATE_AFTER)
  - couchbase.json=true => Use json or java serialization as target format.
 
+
+## Extend operation - no server-side implementation
+
+`extend` (append a value to a field, growing it) runs through the client-side `DB.extend`:
+read the record, concatenate in the YCSB client, write it back. There is no
+`extend.serverside` switch here because this binding cannot push the append down: it stores
+the whole record as one encoded document (`encode(values)` through SDK 1.x
+`add`/`replace`), so an attribute of a record is not addressable server-side at all. The
+SDK's `append` adds raw bytes to the end of the *document*, which would corrupt that encoding
+rather than grow one field.
+
+The Couchbase 2.x binding (`../couchbase2`) does have a server-side extend - one N1QL
+statement with `CONCAT` inside a `CASE` - and is what the experiment scripts drive.

@@ -125,6 +125,36 @@ db.batchsize=1000             # The number of rows to be batched before commit (
 
 Please refer to https://github.com/brianfrankcooper/YCSB/wiki/Core-Properties for all other YCSB core properties.
 
+## Extend operation (`extend.serverside`)
+
+`extend` appends a value to one field, growing it, up to the `maxfieldlength` cap. Two
+implementations are available:
+
+```sh
+extend.serverside=true        # default: append inside the database
+extend.serverside=false       # client side: DB.extend() - read, concatenate here, update
+```
+
+The server-side implementation (default) performs the whole read-modify-write in one
+statement, so the value being grown - which is the big one - never crosses the wire:
+
+```sql
+UPDATE usertable SET field3 = CASE
+    WHEN CHAR_LENGTH(COALESCE(field3, '')) + <append length> < <maxfieldlength>
+    THEN CONCAT(COALESCE(field3, ''), COALESCE(?, '')) ELSE field3 END
+  WHERE ycsb_key = ?
+```
+
+Both implementations append if and only if `len(current) + len(append) < maxfieldlength`, so
+they leave identical data and differ only in where the work happens: a field that would cross
+the limit is written back unchanged and still reports `OK`, and only a missing key reports
+`NOT_FOUND`. Use `-p extend.serverside=false` to reproduce runs taken before the pushdown
+existed (the old code read the row, concatenated in Java and updated it).
+
+One divergence: an SQL `NULL` field becomes the appended value on the server side, while the
+client-side path reads it as this binding's `NULL_VALUE` text and appends to that. YCSB loads
+every field, so rows it creates have no `NULL`s.
+
 ## JDBC Parameter to Improve Insert Performance
 
 Some JDBC drivers support re-writing batched insert statements into multi-row insert statements. This technique can yield order of magnitude improvement in insert statement performance. To enable this feature:
