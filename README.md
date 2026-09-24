@@ -59,9 +59,9 @@ The `./experiment_scripts` directory contains all the necessary bash scripts for
 
 #### Examples:  
 - **MongoDB Workload**:  
-  Use the `./experiment_scripts/experiment_mongodb.sh` script to execute the benchmarking workloads in MongoDB with varying value sizes.  
+  Run `./experiment_scripts/experiment.sh mongodb` to execute the benchmarking workloads in MongoDB with varying value sizes.  
 - **MongoDB Baseline**:  
-  Use the `./experiment_scripts/experiment_mongodb_baseline.sh` script to run baseline executions with fixed value sizes for comparison. 
+  Run `./experiment_scripts/experiment.sh mongodb --mode baseline` for baseline executions with fixed value sizes — the same load/extend/measure phases without the reference and comparison databases. 
 
 Please refer to the general instructions on configuring experiments in the README file at `./experiment_scripts/README.md`. 
 
