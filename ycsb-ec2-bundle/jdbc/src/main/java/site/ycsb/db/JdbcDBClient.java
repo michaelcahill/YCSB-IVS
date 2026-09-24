@@ -94,6 +94,8 @@ public class JdbcDBClient extends DB {
   private int batchSize;
   private boolean autoCommit;
   private boolean batchUpdates;
+  /** True (default) to append inside the database, false to use DB.extend(). */
+  private boolean extendServerSide;
   private static final String DEFAULT_PROP = "";
   private ConcurrentMap<StatementType, PreparedStatement> cachedStatements;
   private long numRowsInBatch = 0;
@@ -193,6 +195,8 @@ public class JdbcDBClient extends DB {
 
     this.autoCommit = getBoolProperty(props, JDBC_AUTO_COMMIT, true);
     this.batchUpdates = getBoolProperty(props, JDBC_BATCH_UPDATES, false);
+    this.extendServerSide = getBoolProperty(props, EXTEND_SERVER_SIDE_PROPERTY,
+        EXTEND_SERVER_SIDE_PROPERTY_DEFAULT);
 
     try {
 //  The SQL Syntax for Scan depends on the DB engine
@@ -430,43 +434,78 @@ public class JdbcDBClient extends DB {
     }
   }
 
+  /**
+   * Extend one field of a record.
+   *
+   * <p>Two implementations, selected by {@code -p extend.serverside} (default
+   * {@code true}):
+   * <ul>
+   * <li><b>client side</b> - {@link DB#extend(String, String, Map, long)}: read the
+   * field, concatenate in this JVM, write the whole value back. The current value
+   * crosses the wire twice.</li>
+   * <li><b>server side</b> - {@link #extendInDatabase}: a single UPDATE appends,
+   * so only the increment travels.</li>
+   * </ul>
+   * Both append if and only if {@code len(current) + len(append) < maxfieldlength},
+   * so they leave identical data.
+   */
   @Override
   public Status extend(String tableName, String key, Map<String, ByteIterator> values, long maxfieldlength) {
     if (values == null || values.isEmpty()) {
       return Status.BAD_REQUEST;
     }
 
+    if (!extendServerSide) {
+      // Client-side extend: read/concatenate/update through the generic interface.
+      return super.extend(tableName, key, values, maxfieldlength);
+    }
+
     Map.Entry<String, ByteIterator> entry = values.entrySet().iterator().next();
     String fieldName = entry.getKey();
     String appendValue = entry.getValue() == null ? "" : entry.getValue().toString();
+    return extendInDatabase(tableName, key, fieldName, appendValue, maxfieldlength);
+  }
 
-    try {
-      StatementType type = new StatementType(StatementType.Type.READ, tableName, 1, "", getShardIndexByKey(key));
-      PreparedStatement readStatement = cachedStatements.get(type);
-      if (readStatement == null) {
-        readStatement = createAndCacheReadStatement(type, key);
+  /**
+   * Server-side extend: the whole read-modify-write happens in one UPDATE, so the
+   * value being grown is never sent to the client.
+   *
+   * <p>The CASE reproduces {@link DB#extend(String, String, Map, long)} exactly -
+   * append only while the field stays under {@code maxfieldlength}, otherwise write
+   * the field back unchanged (still one affected row, so an extend that is skipped
+   * reports OK just as the client-side one does; only a missing key reports zero
+   * rows). The increment length and the limit are known here, so they go into the SQL
+   * as literals and the statement binds just the increment and the key;
+   * CONCAT/CHAR_LENGTH/COALESCE/CASE are understood by MariaDB, MySQL, PostgreSQL and
+   * HSQLDB alike. The increment is wrapped in COALESCE because that is what lets
+   * HSQLDB infer the parameter's type - without it the statement is rejected.
+   *
+   * <p>Two caveats, both documented in EXTEND_STATUS.md:
+   * <ul>
+   * <li>A field that is SQL NULL becomes {@code appendValue} here, whereas the
+   * client-side path reads it as this binding's NULL_VALUE text and appends to that.
+   * Rows YCSB loads have no NULL fields.</li>
+   * <li>Reporting a skipped append as OK relies on the driver counting matched rows,
+   * which is PostgreSQL's behaviour and MariaDB/MySQL Connector/J's default; a URL
+   * with {@code useAffectedRows=true} would report zero rows for it and this method
+   * would return NOT_FOUND.</li>
+   * </ul>
+   */
+  private Status extendInDatabase(String tableName, String key, String fieldName, String appendValue,
+      long maxfieldlength) {
+    String sql = "UPDATE " + tableName + " SET " + fieldName + " = CASE"
+        + " WHEN CHAR_LENGTH(COALESCE(" + fieldName + ", '')) + " + appendValue.length()
+        + " < " + maxfieldlength
+        + " THEN CONCAT(COALESCE(" + fieldName + ", ''), COALESCE(?, ''))"
+        + " ELSE " + fieldName + " END WHERE " + PRIMARY_KEY + " = ?";
+    try (PreparedStatement extendStatement = getShardConnectionByKey(key).prepareStatement(sql)) {
+      extendStatement.setString(1, appendValue);
+      extendStatement.setString(2, key);
+      int result = extendStatement.executeUpdate();
+      if (result == 1) {
+        return Status.OK;
       }
-      readStatement.setString(1, key);
-
-      try (ResultSet resultSet = readStatement.executeQuery()) {
-        if (!resultSet.next()) {
-          return Status.NOT_FOUND;
-        }
-
-        String currentValue = resultSet.getString(fieldName);
-        if (currentValue == null) {
-          currentValue = "";
-        }
-
-        String nextValue = currentValue + appendValue;
-        if (maxfieldlength >= 0 && maxfieldlength < nextValue.length()) {
-          nextValue = nextValue.substring(0, (int) maxfieldlength);
-        }
-
-        HashMap<String, ByteIterator> extendedField = new HashMap<>();
-        extendedField.put(fieldName, new StringByteIterator(nextValue));
-        return update(tableName, key, extendedField);
-      }
+      return Status.NOT_FOUND;
     } catch (SQLException e) {
       System.err.println("Error in processing extend to table: " + tableName + e);
       return Status.ERROR;

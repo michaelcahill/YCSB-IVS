@@ -153,6 +153,41 @@ public class Neo4jConnection {
     }
   }
 
+  /**
+   * Appends to one property inside the database.
+   *
+   * <p>One Cypher statement does the whole read-modify-write, so the value being grown
+   * never travels to the client. The CASE reproduces {@code DB.extend}'s rule exactly -
+   * append only while the property stays under {@code maxfieldlength}, otherwise write it
+   * back unchanged - and the increment length and the limit are constants in the query,
+   * leaving just the key and the increment as parameters. Properties hold strings (that is
+   * what {@link #insert} and {@link #update} store), so {@code +} concatenates them.
+   *
+   * @return OK when a node was written, NOT_FOUND when no node has that id
+   */
+  public Status extend(String table, String key, String field, String appendValue, long maxfieldlength) {
+    try {
+      Result result = session.run(
+          "MATCH (n:" + table + " {id: $key}) SET n." + field + " = CASE"
+              + " WHEN size(coalesce(n." + field + ", '')) + " + appendValue.length()
+              + " < " + maxfieldlength
+              + " THEN coalesce(n." + field + ", '') + $append"
+              + " ELSE n." + field + " END RETURN n.id AS id",
+          Values.parameters("key", key, "append", appendValue)
+      );
+
+      // The RETURN only produces a row when a node with that id was matched.
+      boolean extended = result.hasNext();
+      result.consume();
+
+      return extended ? Status.OK : Status.NOT_FOUND;
+    } catch (Exception e) {
+      System.err.println("Error extending Neo4j node: " + e.getMessage());
+      e.printStackTrace();
+      return Status.ERROR;
+    }
+  }
+
   public Status delete(String table, String key) {
     try {
       Result result = session.run(

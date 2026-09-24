@@ -143,3 +143,32 @@ You can set the following properties (with the default settings applied):
  - couchbase.networkMetricsInterval=0: The interval in seconds when latency metrics will be logged.
  - couchbase.runtimeMetricsInterval=0: The interval in seconds when runtime metrics will be logged.
  - couchbase.documentExpiry=0: Document Expiry is the amount of time(second) until a document expires in Couchbase.
+ - extend.serverside=true: Append inside the cluster (one N1QL statement); false uses the client-side read/concatenate/update of `DB.extend`.
+
+### Extend operation (`extend.serverside`)
+
+With `extend.serverside=true` (default) the whole read-modify-write is a single N1QL
+statement, so the field being grown never reaches the client:
+
+```sql
+UPDATE `bucket` USE KEYS [$1]
+   SET `field3` = CASE WHEN LENGTH(COALESCE(`field3`, "")) + <append length> < <maxfieldlength>
+                       THEN CONCAT(COALESCE(`field3`, ""), $2)
+                       ELSE `field3` END
+ RETURNING META().id
+```
+
+Two N1QL details, both measured rather than assumed: `CONCAT()` rather than the `||` operator,
+because N1QL reads `||` as logical OR in ANSI query mode; and `COALESCE` rather than `IFNULL`,
+because `IFNULL` only covers NULL - a MISSING attribute must fall back to the empty string too,
+otherwise the CASE evaluates to MISSING and deletes the attribute.
+
+Both implementations append if and only if `len(current) + len(append) < maxfieldlength`, so
+they leave identical data; a field at or over the limit is rewritten unchanged (`OK`) and only
+a missing document gives `NOT_FOUND` (no `RETURNING` row).
+
+Note that the server-side extend always goes through the query service, including when
+`couchbase.kv=true`: the KV protocol can append to a raw document but not to one attribute of
+a JSON document, and appending raw bytes would corrupt the stored object. Use
+`extend.serverside=false` for a KV-only run (it reads the document, concatenates in the
+client and replaces it) and to reproduce runs taken before the pushdown existed.

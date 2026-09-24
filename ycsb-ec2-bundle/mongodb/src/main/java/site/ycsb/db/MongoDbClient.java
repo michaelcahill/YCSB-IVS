@@ -42,12 +42,13 @@ import site.ycsb.ByteIterator;
 import site.ycsb.DB;
 import site.ycsb.DBException;
 import site.ycsb.Status;
+import site.ycsb.StringByteIterator;
 
 import org.bson.Document;
 import org.bson.types.Binary;
 
 import java.util.ArrayList;
-//import java.util.Arrays;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -109,6 +110,9 @@ public class MongoDbClient extends DB {
   /** If true then use updates with the upsert option for inserts. */
   private static boolean useUpsert;
 
+  /** True (default) to append inside MongoDB, false to use DB.extend(). */
+  private boolean extendServerSide;
+
   /** The bulk inserts pending for the thread. */
   private final List<Document> bulkInserts = new ArrayList<Document>();
 
@@ -169,6 +173,9 @@ public class MongoDbClient extends DB {
   @Override
   public void init() throws DBException {
     INIT_COUNT.incrementAndGet();
+    // Read before the early return below: the client is shared across threads, but each
+    // instance keeps its own copy of the extend mode.
+    extendServerSide = isServerSideExtend(getProperties());
     synchronized (INCLUDE) {
       if (mongoClient != null) {
         return;
@@ -258,7 +265,7 @@ public class MongoDbClient extends DB {
       MongoCollection<Document> collection = database.getCollection(table);
       Document toInsert = new Document("_id", key);
       for (Map.Entry<String, ByteIterator> entry : values.entrySet()) {
-        toInsert.put(entry.getKey(), entry.getValue().toArray());
+        toInsert.put(entry.getKey(), entry.getValue().toString());
       }
 
       if (batchSize == 1) {
@@ -437,7 +444,7 @@ public class MongoDbClient extends DB {
       Document query = new Document("_id", key);
       Document fieldsToSet = new Document();
       for (Map.Entry<String, ByteIterator> entry : values.entrySet()) {
-        fieldsToSet.put(entry.getKey(), entry.getValue().toArray());
+        fieldsToSet.put(entry.getKey(), entry.getValue().toString());
       }
       Document update = new Document("$set", fieldsToSet);
 
@@ -463,10 +470,74 @@ public class MongoDbClient extends DB {
    */
   protected void fillMap(Map<String, ByteIterator> resultMap, Document obj) {
     for (Map.Entry<String, Object> entry : obj.entrySet()) {
-      if (entry.getValue() instanceof Binary) {
+      Object value = entry.getValue();
+      if (value instanceof String) {
+        resultMap.put(entry.getKey(), new StringByteIterator((String) value));
+      } else if (value instanceof Binary) {
+        // Written by an older version of this binding, which stored values as BSON Binary.
         resultMap.put(entry.getKey(),
-            new ByteArrayByteIterator(((Binary) entry.getValue()).getData()));
+            new ByteArrayByteIterator(((Binary) value).getData()));
       }
+    }
+  }
+
+  /**
+   * Extend one field of a document.
+   *
+   * <p>Two implementations, selected by {@code -p extend.serverside} (default
+   * {@code true}):
+   * <ul>
+   * <li><b>server side</b> - an aggregation-pipeline update appends inside MongoDB, so the
+   * value being grown never reaches the client.</li>
+   * <li><b>client side</b> - {@link DB#extend(String, String, Map, long)}: read,
+   * concatenate here, write the whole value back.</li>
+   * </ul>
+   * Both append if and only if {@code len(current) + len(append) < maxfieldlength}, so they
+   * leave identical data; a field at or over the limit keeps its value ({@code OK}) and only
+   * a missing document gives {@code NOT_FOUND}.
+   *
+   * <p>This needs field values to be strings - MongoDB has no operator that concatenates
+   * BSON Binary ("$concat only supports strings, not binData") - which is what this binding
+   * stores. {@code $strLenCP} counts code points where Java counts UTF-16 units; YCSB values
+   * are printable ASCII, so the two agree.
+   */
+  @Override
+  public Status extend(String table, String key, Map<String, ByteIterator> values,
+      long maxfieldlength) {
+    if (values == null || values.isEmpty()) {
+      return Status.BAD_REQUEST;
+    }
+
+    if (!extendServerSide) {
+      // Client-side extend: read/concatenate/update through the generic interface.
+      return super.extend(table, key, values, maxfieldlength);
+    }
+
+    try {
+      MongoCollection<Document> collection = database.getCollection(table);
+      Map.Entry<String, ByteIterator> entry = values.entrySet().iterator().next();
+      String field = entry.getKey();
+      String appendValue = entry.getValue() == null ? "" : entry.getValue().toString();
+
+      // The current value, or "" when the attribute is missing or null.
+      Document current = new Document("$ifNull", Arrays.asList("$" + field, ""));
+      Document setTo = new Document("$cond", Arrays.asList(
+          new Document("$lt", Arrays.asList(
+              new Document("$add",
+                  Arrays.asList(new Document("$strLenCP", current), appendValue.length())),
+              maxfieldlength)),
+          new Document("$concat", Arrays.asList(current, appendValue)),
+          current));
+
+      UpdateResult result = collection.updateOne(new Document("_id", key),
+          Arrays.<Document>asList(new Document("$set", new Document(field, setTo))));
+      if (result.getMatchedCount() == 0) {
+        return Status.NOT_FOUND;
+      }
+      return result.wasAcknowledged() ? Status.OK : Status.ERROR;
+    } catch (Exception e) {
+      System.err.println(e.toString());
+      return Status.ERROR;
     }
   }
 }
