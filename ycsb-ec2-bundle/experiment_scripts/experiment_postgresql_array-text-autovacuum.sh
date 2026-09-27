@@ -393,9 +393,10 @@ stats_header="CPU,Memory,$(IFS=','; echo "${binding_field_names[*]}")"
 # stderr keeps diagnostics out of captured SQL results and raw YCSB CSV.
 log() {
     case "$*" in
-        "START experiment "*|"END experiment "*|\
+        "START experiment "*|"END experiment "*|"PAUSE experiment "*|\
         "START preflight"|"END preflight"|\
         "START statistics"*|"END statistics"*|"DB statistics"*|\
+        "START metrics"*|"END metrics"*|\
         "START YCSB "*|"END YCSB "*|\
         "START VACUUM"*|"END VACUUM"*|\
         "START WAIT"*|"END WAIT"*|"TIMEOUT WAIT"*|"WAITING"*|\
@@ -403,6 +404,7 @@ log() {
         "Initializing PostgreSQL database "*|"Done initializing "*|\
         "Backing up the database started"|"Backing up the database finished"|\
         "Log file: "*|"Result CSV: "*|"Download this log from EC2: "*|\
+        "=== All steps completed"*|\
         *ERROR*|*WARNING*|Warning:*)
             printf '[epoch=%s phase=%s] %s\n' \
                 "${iteration:-0}" "${phase:-setup}" "$*" >&2
@@ -581,7 +583,7 @@ run_with_metrics() {
     os_1s_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.osstats"
     details_file="$(dirname "$LOG_FILE")/stepdetail_logs/$(basename "$LOG_FILE" ".log")_epoch${epoch:-0}_${phase}.log"
 
-    echo "Starting metrics collection for $db_name"
+    log "START metrics collection for $db_name"
     mkdir -p "${LOG_DIR}"
     mkdir -p "$(dirname "$details_file")"
     mkdir -p "${LOG_DIR}/javagc"
@@ -625,7 +627,7 @@ run_with_metrics() {
 
     trap - EXIT INT TERM
 
-    echo "Finished $db_name phase=$phase epoch=$epoch (exit=$rc)"
+    log "END metrics collection $db_name phase=$phase epoch=$epoch (exit=$rc)"
     set -e
 }
 
@@ -1293,7 +1295,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         fi
         log "END iteration"
         # chance to pause script after an iteration, eg. for maintenance, with 'touch PAUSE_SCRIPT'
- 		while [[ -e "PAUSE_SCRIPT" ]]; do echo "experiment paused..."; sleep 30; done
+ 		while [[ -e "PAUSE_SCRIPT" ]]; do echo "PAUSE experiment paused..."; sleep 30; done
      done
 done
 
