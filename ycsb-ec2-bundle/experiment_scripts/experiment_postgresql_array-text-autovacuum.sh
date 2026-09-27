@@ -532,7 +532,7 @@ run_ycsb() {
     local label="$1"
     local epoch="$2"
     local details_file started=$SECONDS rc=0
-    shift
+    shift 2
 
     details_file="$(dirname "$LOG_FILE")/stepdetail_logs/$(basename "$LOG_FILE" ".log")_epoch${epoch:-0}_${label}.log"
     mkdir -p "$(dirname "$details_file")"
@@ -562,7 +562,12 @@ run_with_metrics() {
     local output_csv=$4
     local rc=0
     local started=$SECONDS
+    local metrics_file=""
+    local db_stats_file=""
+    local disk_stats_file=""
     local pg_1s_file=""
+    local os_1s_file=""
+    local details_file=""
     local run_buffer_sampler_pid=""
     local operation_count=""
     local wal_start_lsn=""
