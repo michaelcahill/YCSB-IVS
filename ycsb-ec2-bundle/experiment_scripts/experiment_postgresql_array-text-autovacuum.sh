@@ -110,28 +110,28 @@ global_metric_names=(
 )
 
 table_metric_names=(
-    n_tup_upd n_live_tup n_dead_tup n_ins_since_vacuum vacuum_count autovacuum_count
-    total_vacuum_time total_autovacuum_time total_analyze_time total_autoanalyze_time
-)
-
-relsize_metric_names=(
-    relation_name relation_type raw_rel_size relation_size
+    n_tup_ins n_tup_upd n_tup_del n_live_tup n_dead_tup n_ins_since_vacuum vacuum_count autovacuum_count
+    total_vacuum_time total_autovacuum_time autoanalyze_count total_autoanalyze_time total_analyze_time
 )
 
 binding_field_names=("${global_metric_names[@]}")
-
 for prefix in usertable toast; do
     for metric in "${table_metric_names[@]}"; do
         binding_field_names+=("${prefix}_${metric}")
     done
 done
-
-binding_field_names+=(toast_n_tup_ins toast_n_tup_del)
-
 binding_field_names+=(
     usertable_heap_blks_read usertable_heap_blks_hit usertable_idx_blks_read usertable_idx_blks_hit
     toast_blks_read toast_blks_hit tidx_blks_read tidx_blks_hit
+	usertable_relpages usertable_size_in_bytes
+	toast_relpages toast_size_in_bytes
 )
+
+# for second user-readable query to check for relation sizes
+relsize_metric_names=(
+    relation_name relation_type relpages raw_rel_size relation_size
+)
+
 
 pg_cli() {
     local tool="$1"
@@ -180,18 +180,21 @@ collect_postgres_metrics() {
             done
         done
 
-        extra_select+=", t.n_tup_ins, t.n_tup_del"
-
         # toast_* and tidx_* belong to the PARENT row, not the TOAST row.
         extra_select+=", io.heap_blks_read, io.heap_blks_hit, io.idx_blks_read, io.idx_blks_hit,
                          io.toast_blks_read, io.toast_blks_hit, io.tidx_blks_read, io.tidx_blks_hit"
+        # finally add usertable and toast table sizes
+        extra_select+=", rc.relpages AS usertable_relpages, pg_relation_size(rc.oid) AS usertable_size_in_bytes,
+                         rt.relpages AS toast_relpages, pg_relation_size(rt.oid) AS toast_size_in_bytes"
+        
         # Resolve schema-qualified usertable, then follow reltoastrelid. TOAST
         # names/OIDs change when the comparison DB is recreated or restored.
         extra_joins="
-        JOIN pg_catalog.pg_class AS r ON r.oid = to_regclass('public.usertable')
-        JOIN pg_catalog.pg_stat_all_tables AS u ON u.relid = r.oid
-        JOIN pg_catalog.pg_stat_all_tables AS t ON t.relid = r.reltoastrelid
-        JOIN pg_catalog.pg_statio_all_tables AS io ON io.relid = r.oid"
+        JOIN pg_catalog.pg_class AS rc ON rc.oid = to_regclass('public.usertable')
+        JOIN pg_catalog.pg_stat_all_tables AS u ON u.relid = rc.oid
+        JOIN pg_catalog.pg_stat_all_tables AS t ON t.relid = rc.reltoastrelid
+        JOIN pg_catalog.pg_statio_all_tables AS io ON io.relid = rc.oid
+        JOIN pg_catalog.pg_class AS rt ON rt.oid = rc.reltoastrelid"
     fi
     log "START statistics snapshot database=$db scope=$scope"
     # Capture the exit status BEFORE read: read <<< $(psql ...) hides SQL errors.
@@ -236,7 +239,8 @@ collect_postgres_metrics() {
     done
     log "DB statistics $dbmetrics"
 
-	# check for relation sizes too
+	# check for relation sizes for separate logfile output (CSV captures main vals too)
+	# not really needed for CSV output, just nicer debug output in logfile
     if ! size_output=$(pg_exec -d "$db" -At -F '|' -c "
         SELECT c.relname AS relation_name,
  				CASE c.relkind
@@ -249,6 +253,7 @@ collect_postgres_metrics() {
   			      WHEN 'I' THEN 'partitioned_index'
    			     ELSE c.relkind::text
   			  END AS relation_type,
+  			c.relpages,
     		pg_relation_size(c.oid) raw_rel_size,
 		    pg_size_pretty(pg_relation_size(c.oid)) AS relation_size
 		FROM pg_catalog.pg_class AS c
