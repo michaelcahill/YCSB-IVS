@@ -402,8 +402,8 @@ log() {
         "Backing up the database started"|"Backing up the database finished"|\
         "Log file: "*|"Result CSV: "*|"Download this log from EC2: "*|\
         *ERROR*|*WARNING*|Warning:*)
-            printf '[epoch=%s run=%s phase=%s] %s\n' \
-                "${epoch:-0}" "${step:-0}" "${phase:-setup}" "$*" >&2
+            printf '[epoch=%s phase=%s] %s\n' \
+                "${iteration:-0}" "${phase:-setup}" "$*" >&2
             ;;
         *)
             return 0
@@ -610,7 +610,7 @@ run_with_metrics() {
 
 	# execute ycsb program including JAVA_OPTS to log garbage collector
 	started=$SECONDS
-	JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc-run${RUN}-${phase}-${epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
+	JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc_run${RUN}_${phase}_epoch${epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
     "$@" 2>&1 | tee "$output_csv" "$details_file" > /dev/null || rc=$?
 
     log "END YCSB $phase status=$rc duration=$((SECONDS-started))s"
@@ -964,7 +964,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         if [[ $vacuum -eq 1 ]]; then
             vacuum_started=$SECONDS
             vacuum_rc=0
-            vacuum_log="vacuum_logs/${LOG_FILE%.log}_iteration${iteration}_epoch${epoch}_step${step}_vacuum.raw.log"
+            vacuum_log="${LOG_DIR}/vacuum_logs/${LOG_FILE%.log}_epoch${iteration}_vacuum.raw.log"
             mkdir -p "$(dirname "$vacuum_log")"
 
             log "START VACUUM ANALYZE database=$DB_NAME"
@@ -1135,7 +1135,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             phase="clean-run"
 
             log "Backing up the database started"
-            RESTORE_LOG="${LOG_DIR}/restore_logs/${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_step${step}_restore.log"
+            RESTORE_LOG="${LOG_DIR}/restore_logs/${EXPERIMENT_NAME}_epoch${iteration}_restore.log"
             restore_comparison_database
             log "Backing up the database finished"
 
