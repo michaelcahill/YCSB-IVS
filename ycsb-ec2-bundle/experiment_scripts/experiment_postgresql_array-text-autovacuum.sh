@@ -859,9 +859,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
     for step in $(seq 1 "$STEPS_PER_EPOCH"); do
 
         iteration=$((STEPS_PER_EPOCH*($epoch-1)+$step))
-        if (( $iteration < $RESUME_FROM_EPOCH )); then
-        	continue
-        fi
+         (( iteration >= RESUME_FROM_EPOCH )) || continue
 
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
@@ -957,8 +955,6 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         get_key_sizes $KEY_SIZE_LOG $HISTOGRAM_FILE
 
         # Check if the output file exists, if not, create it with headers
-        iteration=$((STEPS_PER_EPOCH*($epoch-1)+$step))
-
         if [[ ! -f "$KEY_SIZE_FILE_AFTER_EXTEND" ]]; then
             # Add header row
             echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_EXTEND"
@@ -1140,7 +1136,6 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
 
-        # if (( $((STEPS_PER_EPOCH*($epoch-1)+$step)) % 1 == 0 )); then
         if (( COMPARISON_INTERVAL > 0 && iteration % COMPARISON_INTERVAL == 0 )); then
             phase="clean-run"
 
@@ -1190,7 +1185,6 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             log "END size computation database=$BACKUP_DB_NAME"
 
             # Check if the output file exists, if not, create it with headers
-            iteration=$((STEPS_PER_EPOCH*($epoch-1)+$step))
             if [[ ! -f "$KEY_SIZE_FILE_AFTER_RUN" ]]; then
                 # Add header row
                 echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_RUN"
