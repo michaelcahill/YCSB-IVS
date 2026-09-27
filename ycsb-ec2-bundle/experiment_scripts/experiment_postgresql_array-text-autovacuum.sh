@@ -399,6 +399,7 @@ log() {
         "START YCSB "*|"END YCSB "*|\
         "START VACUUM"*|"END VACUUM"*|\
         "START WAIT"*|"END WAIT"*|"TIMEOUT WAIT"*|"WAITING"*|\
+        "ALTER TABLE"*|\
         "Initializing PostgreSQL database "*|"Done initializing "*|\
         "Backing up the database started"|"Backing up the database finished"|\
         "Log file: "*|"Result CSV: "*|"Download this log from EC2: "*|\
@@ -887,8 +888,16 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         extendproportion=${extendproportion:-""}
 
         # Execute the extend phase
-        log "=== Executing the extend phase with extendproportion=1 and other proportions=0 ==="
+        log "=== Executing the extend phase ==="
         phase="extend"
+        
+        # (re-)enable auto-vacuum for usertable (only if no manual vacuum)
+        if (( $vacuum == 0 )); then
+        	autovacuum_on_cmd="ALTER TABLE usertable RESET (autovacuum_enabled,autovacuum_vacuum_scale_factor);"
+        	log "$autovacuum_on_cmd"
+	        pg_exec -d "$DB_NAME" -c "${autovacuum_on_cmd}" 2>&1
+	    fi
+
         # Capture both stdout and stderr to capture status messages
         run_with_metrics "$DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
             "$YCSB" run "$YCSB_BINDING" -s \
@@ -1098,8 +1107,13 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         -c "SELECT ycsb_key
             FROM usertable;" > keys_before_run.txt
 
-		# wait for all backend processes to finish before doing clean run (max 20 mins)
+		# wait for all backend processes to finish before doing reference run (max 20 mins)
 		wait_for_idle_postgres "$DB_NAME" 20 1200
+
+        # disable auto-vacuum on usertable for following phases
+      	autovacuum_off_cmd="ALTER TABLE usertable SET (autovacuum_enabled=false,autovacuum_vacuum_scale_factor=10);"
+       	log "$autovacuum_off_cmd"
+        pg_exec -d "$DB_NAME" -c "${autovacuum_off_cmd}" 2>&1
 
         # Reference workload with unchanging value sizes
         phase="reference"
@@ -1146,6 +1160,10 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
 
 			# wait for all backend processes to finish before doing clean run (max 20 mins)
 			wait_for_idle_postgres "$DB_NAME" 20 1200
+	        # disable auto-vacuum on usertable for following phases
+      		autovacuum_off_cmd="ALTER TABLE usertable SET (autovacuum_enabled=false,autovacuum_vacuum_scale_factor=10);"
+    	   	log "$autovacuum_off_cmd"
+	        pg_exec -d "$DB_NAME" -c "${autovacuum_off_cmd}" 2>&1
 
 			run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
                 "$YCSB" run "$YCSB_BINDING" -s \
