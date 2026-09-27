@@ -41,6 +41,7 @@ vacuum=0
 NUM_EPOCHS=${NUM_EPOCHS:-10}
 STEPS_PER_EPOCH=${STEPS_PER_EPOCH:-10}
 COMPARISON_INTERVAL=${COMPARISON_INTERVAL:-1}
+RESUME_FROM_EPOCH=-1 # set to between 1 and NUM_EPOCHS*STEPS_PER_EPOCH to resume an experiment
 
 # Define execution ID for this run, based on UTC timestamp and process ID
 EXECUTION_ID="$(date -u +%Y%m%dT%H%M%SZ)_$$"
@@ -416,7 +417,6 @@ start_logging() {
 
     mkdir -p "$(dirname "$LOG_FILE")"
     LOG_FILE="$(cd "$(dirname "$LOG_FILE")" && pwd)/$(basename "$LOG_FILE")"
-    : > "$LOG_FILE"
 
     LOGGER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ycsb-logger.XXXXXX")
     if ! mkfifo "$LOGGER_DIR/stream"; then
@@ -787,6 +787,10 @@ postgres_preflight true "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"
 log "END preflight"
 mkdir -p "$(dirname "$OUTPUT_FILE")" "$(dirname "$KEY_SIZE_FILE_AFTER_EXTEND")"
 
+# -----------------------------------------------------------------------------------
+# only do the initial load phase if we are not resuming from some previous epoch runs
+if (( $RESUME_FROM_EPOCH <= 0 )); then
+
 # Clear the log file and previous backups
 > $PLAN_LOG
 > $HISTOGRAM_FILE
@@ -844,6 +848,9 @@ run_with_metrics "$UNCHANGED_DB_NAME" "$phase" "$step" "$OUTPUT_CSV" \
 total_size_reference_load=$(pg_exec -d "$UNCHANGED_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(coalesce(array_to_string(field0, ''), '')) + octet_length(coalesce(array_to_string(field1, ''), '')) + octet_length(coalesce(array_to_string(field2, ''), '')) + octet_length(coalesce(array_to_string(field3, ''), '')) + octet_length(coalesce(array_to_string(field4, ''), '')) + octet_length(coalesce(array_to_string(field5, ''), '')) + octet_length(coalesce(array_to_string(field6, ''), '')) + octet_length(coalesce(array_to_string(field7, ''), '')) + octet_length(coalesce(array_to_string(field8, ''), '')) + octet_length(coalesce(array_to_string(field9, ''), ''))) FROM usertable;")
 log "Reference-load verification - TotalSize:$total_size_reference_load ExpectedFieldLength:$fieldlengthoriginal"
 
+fi # $RESUME_FROM_EPOCH
+# -----------------------------------------------------------------------------------
+
 # Save original operationcount before modifying it
 original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
@@ -852,6 +859,9 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
     for step in $(seq 1 "$STEPS_PER_EPOCH"); do
 
         iteration=$((STEPS_PER_EPOCH*($epoch-1)+$step))
+        if (( $iteration < $RESUME_FROM_EPOCH )); then
+        	continue
+        fi
 
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
