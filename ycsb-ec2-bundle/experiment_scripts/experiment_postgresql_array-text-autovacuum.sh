@@ -1114,16 +1114,16 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         -c "SELECT ycsb_key
             FROM usertable;" > keys_before_run.txt
 
+        # Reference workload with unchanging value sizes
+        phase="reference"
+
 		# wait for all backend processes to finish before doing reference run (max 20 mins)
 		wait_for_idle_postgres "$DB_NAME" 20 1200
-
         # disable auto-vacuum on usertable for following phases
       	autovacuum_off_cmd="ALTER TABLE usertable SET (autovacuum_enabled=false,autovacuum_vacuum_scale_factor=10);"
        	log "$autovacuum_off_cmd"
         pg_exec -d "$DB_NAME" -c "${autovacuum_off_cmd}" 2>&1
 
-        # Reference workload with unchanging value sizes
-        phase="reference"
         run_with_metrics "$UNCHANGED_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
         "$YCSB" run "$YCSB_BINDING" -s \
         -P "$WORKLOAD_FILE" \
