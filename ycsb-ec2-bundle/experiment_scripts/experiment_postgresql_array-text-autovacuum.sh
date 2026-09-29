@@ -900,7 +900,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         
         # (re-)enable auto-vacuum for usertable (only if no manual vacuum)
         if (( $vacuum == 0 )); then
-        	autovacuum_on_cmd="ALTER TABLE usertable RESET (autovacuum_enabled,autovacuum_vacuum_scale_factor);"
+        	autovacuum_on_cmd="ALTER TABLE usertable RESET (autovacuum_enabled);"
         	log "$autovacuum_on_cmd"
 	        pg_exec -d "$DB_NAME" -c "${autovacuum_on_cmd}" 2>&1
 	    fi
@@ -1117,10 +1117,10 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         # Reference workload with unchanging value sizes
         phase="reference"
 
-		# wait for all backend processes to finish before doing reference run (max 20 mins)
-		wait_for_idle_postgres "$DB_NAME" 20 1200
+        # wait for all backend processes to finish before doing reference run (max 2 h)
+        wait_for_idle_postgres "$DB_NAME" 30 7200
         # disable auto-vacuum on usertable for following phases
-      	autovacuum_off_cmd="ALTER TABLE usertable SET (autovacuum_enabled=false,autovacuum_vacuum_scale_factor=10);"
+      	autovacuum_off_cmd="ALTER TABLE usertable SET (autovacuum_enabled=false);"
        	log "$autovacuum_off_cmd"
         pg_exec -d "$DB_NAME" -c "${autovacuum_off_cmd}" 2>&1
 
@@ -1168,7 +1168,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
 			# wait for all backend processes to finish before doing clean run (max 20 mins)
 			wait_for_idle_postgres "$DB_NAME" 20 1200
 	        # disable auto-vacuum on usertable for following phases
-      		autovacuum_off_cmd="ALTER TABLE usertable SET (autovacuum_enabled=false,autovacuum_vacuum_scale_factor=10);"
+      		autovacuum_off_cmd="ALTER TABLE usertable SET (autovacuum_enabled=false);"
     	   	log "$autovacuum_off_cmd"
 	        pg_exec -d "$DB_NAME" -c "${autovacuum_off_cmd}" 2>&1
 
