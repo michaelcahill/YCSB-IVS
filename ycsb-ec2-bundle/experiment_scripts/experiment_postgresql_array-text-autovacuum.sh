@@ -777,6 +777,51 @@ close_db() {
     log "PostgreSQL backend: no manual DB close required."
 }
 
+archive_experiment_configuration()
+{
+    local config_dir="${EXPERIMENT_DIR}/config"
+    local pglog_dir="${LOG_DIR}/postgresql_logs"
+    local logfile
+
+    log "START experiment configuration archive"
+
+    mkdir -p "$config_dir" || return 1
+    mkdir -p "$pglog_dir" || return 1
+
+    #
+    # Copy experiment configuration files
+    #
+    cp "$0" "$config_dir/"
+    cp "${SCRIPT_DIR}/watcher.sh" "$config_dir/"
+    cp "${SCRIPT_DIR}/../bin/bindings.properties" "$config_dir/"
+    cp "$WORKLOAD_FILE" "$config_dir/"
+
+    #
+    # Archive PostgreSQL configuration
+    #
+    if sudo cp -p "${PGDATA_PATH}/postgresql.conf" "$config_dir/"; then
+        sudo chmod a+r "$config_dir/postgresql.conf"
+    else
+        log "WARNING: Failed to archive postgresql.conf"
+    fi
+
+    #
+    # Archive PostgreSQL weekday log files
+    # not sure which one we need - log may have rotated while script was running...
+    #
+    for day in Mon Tue Wed Thu Fri Sat Sun; do
+        logfile="${PGDATA_PATH}/log/postgresql-${day}.log"
+
+        sudo test -f "$logfile" || continue
+        if sudo grep -q "EXPERIMENT RUN=${RUN}" "$logfile"; then
+            sudo rsync -a "$logfile" "$pglog_dir/" || continue
+            sudo chmod a+r "$pglog_dir/"$(basename "${logfile}")
+        fi
+    done
+
+    log "END experiment configuration archive config_dir=$config_dir log_dir=$pglog_dir"
+}
+
 # Function to append values for the first iteration
 append_first_iteration() {
     local key_size_log="$1"
@@ -1356,6 +1401,9 @@ done
 # rm -rf $OUTPUT_CSV
 # rm -rf $KEY_SIZE_LOG
 
+# save config and log files
 pg_exec -q -d "$DB_NAME" -c "SELECT experiment_log('EXPERIMENT RUN=${RUN} END');" >/dev/null
+archive_experiment_configuration
+
 log "=== All steps completed. Results are logged in $LOG_FILE ==="
 EXPERIMENT_COMPLETED=1
