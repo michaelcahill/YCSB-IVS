@@ -576,6 +576,7 @@ run_ycsb() {
     mkdir -p "$(dirname "$details_file")"
 
     log "START YCSB $label"
+	pg_exec -q -d "$DB_NAME" -c "SELECT experiment_log('EXPERIMENT RUN=${RUN} EPOCH=${epoch} PHASE=${label}');" >/dev/null
 
     # Preserve raw output for CSV parsing and retain a separate detailed file.
     # Do not copy it into the main experiment log.
@@ -645,6 +646,7 @@ run_with_metrics() {
     trap "kill -TERM -$watcher_pid 2>/dev/null" EXIT INT TERM
 
     log "START YCSB $phase"
+	pg_exec -q -d "$DB_NAME" -c "SELECT experiment_log('EXPERIMENT RUN=${RUN} EPOCH=${epoch} PHASE=${phase}');" >/dev/null
 
 	# execute ycsb program including JAVA_OPTS to log garbage collector
 	started=$SECONDS
@@ -680,6 +682,21 @@ initialize_database() {
             field0 TEXT[], field1 TEXT[], field2 TEXT[], field3 TEXT[], field4 TEXT[],
             field5 TEXT[], field6 TEXT[], field7 TEXT[], field8 TEXT[], field9 TEXT[]
         );"
+
+    # utility SQL function to log messages in the postgresql logfile itself
+    # temporarily disable any annoying CONTEXT and STATEMENT log lines (PSQL 15+)
+    sudo -u postgres psql -d "$DB_NAME" -q -c "
+        GRANT SET ON PARAMETER log_min_error_statement TO \"$DB_USERNAME\";
+        GRANT SET ON PARAMETER log_error_verbosity     TO \"$DB_USERNAME\";"
+    pg_exec -d "$db_name" -c \
+        "CREATE OR REPLACE FUNCTION experiment_log(msg text) RETURNS void
+        AS \$\$
+        BEGIN               
+            RAISE LOG '%', msg;
+        END;
+        \$\$ LANGUAGE plpgsql
+        SET log_min_error_statement = 'panic'  -- Applied on entry, restored on exit
+        SET log_error_verbosity = 'terse';"
 
     log "Done initializing $db_name."
 }
@@ -1339,5 +1356,6 @@ done
 # rm -rf $OUTPUT_CSV
 # rm -rf $KEY_SIZE_LOG
 
+pg_exec -q -d "$DB_NAME" -c "SELECT experiment_log('EXPERIMENT RUN=${RUN} END');" >/dev/null
 log "=== All steps completed. Results are logged in $LOG_FILE ==="
 EXPERIMENT_COMPLETED=1
