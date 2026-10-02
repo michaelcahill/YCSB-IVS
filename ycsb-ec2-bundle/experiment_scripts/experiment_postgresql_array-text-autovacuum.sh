@@ -14,6 +14,7 @@ DB_NAME="${DB_NAME:-ycsb}"
 BACKUP_DB_NAME="${BACKUP_DB_NAME:-ycsb_backup}"
 UNCHANGED_DB_NAME="${UNCHANGED_DB_NAME:-ycsb_unchange}"
 TARGET_TABLE="${TARGET_TABLE:-usertable}"
+PGDATA_PATH=$(sudo -u postgres psql -d postgres -At -c "SHOW data_directory;")
 
 # PostgreSQL endpoint shared by JDBC and CLI commands
 DB_HOST="${DB_HOST:-127.0.0.1}"
@@ -495,6 +496,34 @@ finish_logging() {
     exit "$rc"
 }
 
+log_recent_autovacuum()
+{
+    local database="${1:-$DB_NAME}"
+    local logfile loglines vacuum_start autovac_lines autovac_line log_time age
+
+    logfile=$(sudo -u postgres psql -d "$database" -At -c \
+        "SELECT pg_current_logfile();") || {
+        log "ERROR: Failed to determine PostgreSQL logfile"
+        return 1
+    }
+
+    # if pg_current_logfile() returned a relative path, prepend PGDATA_PATH to log dir
+    [[ "$logfile" = /* ]] || logfile="$PGDATA_PATH/$logfile"
+
+    # if last entry in psql logfile is recent(!) statistics of an autovacuum, log this
+    loglines=$(sudo tail -50 "$logfile")
+    vacuum_start=$(grep -n "LOG:  automatic vacuum" <<< "$loglines" | tail -1 | cut -d: -f1) || return 0
+    if [[ -n "$vacuum_start" ]]; then
+        autovac_lines=$(sed -n "${vacuum_start},$((vacuum_start+11))p" <<< "$loglines")
+        autovac_line=$(head -1 <<< "$autovac_lines")
+        log_time=$(date -u -d "${autovac_line:0:19} UTC" +%s 2>/dev/null) || return 0
+        age=$(( $(date -u +%s) - log_time ))
+        if (( age <= 60 )); then
+            log "DB statistics of recent autovacuum age=${age}s: ${autovac_lines//$'\n'/'; '}"
+        fi
+    fi
+}
+
 wait_for_idle_postgres() {
     local database="${1:-$DB_NAME}"
     local interval="${2:-20}"
@@ -523,6 +552,7 @@ wait_for_idle_postgres() {
        		"SELECT backend_type, query, query_start, wait_event, state FROM pg_stat_activity WHERE state != 'idle' AND pid != pg_backend_pid();")
 	    if [[ -z "$active_backends" ]]; then
 			log "END WAIT FOR IDLE POSTGRES duration=$((SECONDS-idle_wait_started))s"
+			log_recent_autovacuum
 	       	break
     	fi
     	active_count=$(grep -c '^' <<< "$active_backends")
