@@ -10,6 +10,19 @@
 # the "=== …phase ===" banners); a decision on 2026-09-24 widened it to log
 # everything. Verbosity is therefore controlled at the call site, never by a message
 # filter that future callers must know about.
+# The three context fields are the position of the message inside the experiment, and they mean
+# exactly what the phase loop sets them to:
+#
+#   epoch  which epoch the current iteration belongs to (the outer loop; 0 before it starts)
+#   run    which step *within that epoch* (the inner loop) — NOT the --run-id run counter, which
+#          is $RUN and appears in the "START experiment" line and in every artefact name.
+#          The name is historical and shared with analysis_scripts/plot_postgresql_phase_runtime.py,
+#          which likewise refuses to confuse it with the run counter; do not reuse this field.
+#   phase  the phase being executed (setup before the first one, complete after the last)
+#
+# A phase function must therefore set `phase` before its first log() call, and nothing may shadow
+# epoch/step with a different quantity: log() reads the globals, so a local named `epoch` holding
+# something else silently mislabels every line emitted while it is in scope.
 log() {
     printf '[epoch=%s run=%s phase=%s] %s\n' \
         "${epoch:-0}" "${step:-0}" "${phase:-setup}" "$*" >&2
@@ -60,7 +73,9 @@ start_logging() {
     trap 'exit 143' TERM
     trap 'finish_logging "$?"' EXIT
 
-    log "START experiment execution=$EXECUTION_ID host=$DB_HOST port=$DB_PORT"
+    # The run counter cannot appear in the per-line prefix (see log()), so it is recorded here
+    # once, next to the id that distinguishes this attempt from an earlier one of the same run.
+    log "START experiment execution=$EXECUTION_ID run=${RUN:-?} host=$DB_HOST port=$DB_PORT"
     log "Log file: $LOG_FILE"
     log "Result CSV: $OUTPUT_FILE"
 }

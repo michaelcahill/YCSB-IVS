@@ -1,4 +1,4 @@
-[<TIMESTAMP>] [epoch=0 run=0 phase=setup] START experiment execution=<EXECUTION_ID> host=127.0.0.1 port=<N>
+[<TIMESTAMP>] [epoch=0 run=0 phase=setup] START experiment execution=<EXECUTION_ID> run=1 host=127.0.0.1 port=<N>
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] Log file: <WORKDIR>/experiment/logs/ycsb_smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1_results.log
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] Result CSV: <WORKDIR>/experiment/data/workload_data/smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1.csv
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] START preflight
@@ -39,7 +39,7 @@
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] START PostgreSQL operation tool=psql action=CREATE database=ycsb_smoke_unch
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] END PostgreSQL operation tool=psql action=CREATE database=ycsb_smoke_unch status=0 duration=<N>s
 [<TIMESTAMP>] [epoch=0 run=0 phase=setup] Done initializing ycsb_smoke_unch.
-[<TIMESTAMP>] [epoch=0 run=0 phase=setup] === Executing the load phase ===
+[<TIMESTAMP>] [epoch=0 run=0 phase=load] === Executing the load phase ===
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke
 [<TIMESTAMP>] [epoch=0 run=0 phase=load] START YCSB load
 [<TIMESTAMP>] [epoch=0 run=0 phase=load] END YCSB load status=0 duration=<N>s
@@ -67,7 +67,7 @@
 [<TIMESTAMP>] [epoch=0 run=0 phase=reference-load] START PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke_unch
 [<TIMESTAMP>] [epoch=0 run=0 phase=reference-load] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke_unch status=0 duration=<N>s
 [<TIMESTAMP>] [epoch=0 run=0 phase=reference-load] Reference-load verification - TotalSize:<N> ExpectedFieldLength:100
-[<TIMESTAMP>] [epoch=1 run=1 phase=reference-load] === Generating the extend workload ===
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] === Generating the extend workload ===
 [<TIMESTAMP>] [epoch=1 run=1 phase=extend] MAINTENANCE mode=on database=ycsb_smoke background maintenance of the measured table
 [<TIMESTAMP>] [epoch=1 run=1 phase=extend] START PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke
 [<TIMESTAMP>] [epoch=1 run=1 phase=extend] END PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke status=0 duration=<N>s
@@ -129,16 +129,16 @@
 [<TIMESTAMP>] [epoch=1 run=1 phase=run] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke status=0 duration=<N>s
 [<TIMESTAMP>] [epoch=1 run=1 phase=run] START PostgreSQL operation tool=psql action=psql database=ycsb_smoke
 [<TIMESTAMP>] [epoch=1 run=1 phase=run] END PostgreSQL operation tool=psql action=psql database=ycsb_smoke status=0 duration=<N>s
-[<TIMESTAMP>] [epoch=1 run=1 phase=run] START PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke_unch
-[<TIMESTAMP>] [epoch=1 run=1 phase=run] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke_unch status=0 duration=<N>s
-[<TIMESTAMP>] [epoch=1 run=1 phase=run] START WAIT FOR IDLE POSTGRES database=ycsb_smoke
-[<TIMESTAMP>] [epoch=1 run=1 phase=run] START PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke
-[<TIMESTAMP>] [epoch=1 run=1 phase=run] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke status=0 duration=<N>s
-[<TIMESTAMP>] [epoch=1 run=1 phase=run] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s
-[<TIMESTAMP>] [epoch=1 run=1 phase=run] MAINTENANCE idle window <STATS>
-[<TIMESTAMP>] [epoch=1 run=1 phase=run] MAINTENANCE mode=off database=ycsb_smoke background maintenance of the measured table
-[<TIMESTAMP>] [epoch=1 run=1 phase=run] START PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke
-[<TIMESTAMP>] [epoch=1 run=1 phase=run] END PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke status=0 duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] START PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke_unch
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke_unch status=0 duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] START WAIT FOR IDLE POSTGRES database=ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] START PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke status=0 duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] MAINTENANCE idle window <STATS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] MAINTENANCE mode=off database=ycsb_smoke background maintenance of the measured table
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] START PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=reference] END PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke status=0 duration=<N>s
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke_unch
 [<TIMESTAMP>] [epoch=1 run=1 phase=reference] START YCSB reference
 [<TIMESTAMP>] [epoch=1 run=1 phase=reference] END YCSB reference status=0 duration=<N>s
@@ -240,14 +240,14 @@
 [<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END statistics snapshot database=ycsb_smoke_bak statistics=<N> relsizes=<N>
 [<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] START CSV write database statistics phase=avg-run
 [<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END CSV write output=<WORKDIR>/experiment/data/workload_data/smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1.csv
-[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END iteration
-[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] MAINTENANCE mode=on database=ycsb_smoke background maintenance of the measured table
-[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] START PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke
-[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke status=0 duration=<N>s
-[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] START experiment configuration archive directory=<WORKDIR>/experiment/config
-[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] ARCHIVE server configuration <FILE>
-[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] ARCHIVE server log <SLICE>
-[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END experiment configuration archive directory=<WORKDIR>/experiment/config files=5
-[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] === All steps completed. Results are logged in <WORKDIR>/experiment/logs/ycsb_smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1_results.log ===
-[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END experiment status=0 duration=<N>s
-[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] Download this log from EC2: <WORKDIR>/experiment/logs/ycsb_smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1_results.log
+[<TIMESTAMP>] [epoch=1 run=1 phase=iteration-end] END iteration
+[<TIMESTAMP>] [epoch=1 run=1 phase=complete] MAINTENANCE mode=on database=ycsb_smoke background maintenance of the measured table
+[<TIMESTAMP>] [epoch=1 run=1 phase=complete] START PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=complete] END PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke status=0 duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=complete] START experiment configuration archive directory=<WORKDIR>/experiment/config
+[<TIMESTAMP>] [epoch=1 run=1 phase=complete] ARCHIVE server configuration <FILE>
+[<TIMESTAMP>] [epoch=1 run=1 phase=complete] ARCHIVE server log <SLICE>
+[<TIMESTAMP>] [epoch=1 run=1 phase=complete] END experiment configuration archive directory=<WORKDIR>/experiment/config files=5
+[<TIMESTAMP>] [epoch=1 run=1 phase=complete] === All steps completed. Results are logged in <WORKDIR>/experiment/logs/ycsb_smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1_results.log ===
+[<TIMESTAMP>] [epoch=1 run=1 phase=complete] END experiment status=0 duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=complete] Download this log from EC2: <WORKDIR>/experiment/logs/ycsb_smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1_results.log

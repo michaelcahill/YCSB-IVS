@@ -62,10 +62,15 @@ export UNCHANGED_DB_NAME="${UNCHANGED_DB_NAME:-ycsb${suffix}_unch}"
 export BACKUP_DB_NAME="${BACKUP_DB_NAME:-ycsb${suffix}_bak}"
 
 export TYPE="${TYPE:-smoke_${BACKEND}}"
-export RUN="1"
+# Deliberately larger than any step number, so that a log line confusing the --run-id counter with
+# the step within an epoch cannot pass the checks below unnoticed.
+export RUN="${RUN:-3}"
 export EXPERIMENT_MODE="$MODE"
-export NUM_EPOCHS=1
-export STEPS_PER_EPOCH=1
+# More than one iteration: with a single epoch and a single step there is nothing in the log that
+# distinguishes epoch, step and global iteration from each other, which is exactly the confusion
+# these checks look for.
+export NUM_EPOCHS="${NUM_EPOCHS:-2}"
+export STEPS_PER_EPOCH="${STEPS_PER_EPOCH:-2}"
 export COMPARISON_INTERVAL=1        # baseline mode forces it to 0, by design
 export EXTEND_OPERATIONCOUNT="${EXTEND_OPERATIONCOUNT:-300}"
 export DB_STATS_INTERVAL=1
@@ -153,6 +158,27 @@ grep -q 'END experiment status=0' "$LOG" || fail "completion marker missing from
 for phase in "${PHASES[@]}"; do
     grep -q "phase=$phase\] START YCSB $phase" "$LOG" || fail "phase '$phase' never started"
 done
+
+# --- every log line is positioned by the loop it ran in ------------------------
+# The prefix carries the epoch and the step within it; analysis scripts key their rows on those
+# two, so neither field may ever hold a different quantity — an iteration counted as an epoch (a
+# local in run_with_metrics used to shadow the loop variable that way) or the --run-id counter
+# counted as a step.
+prefixes="$(grep -o '\[epoch=[0-9]\+ run=[0-9]\+' "$LOG" | sed 's/^\[//')"
+[[ -n "$prefixes" ]] || fail "the results log has no epoch/run position markers"
+max_epoch="$(cut -d' ' -f1 <<<"$prefixes" | cut -d= -f2 | sort -n | tail -1)"
+max_step="$(cut -d' ' -f2 <<<"$prefixes" | cut -d= -f2 | sort -n | tail -1)"
+(( max_epoch <= NUM_EPOCHS )) ||
+    fail "log lines report epoch=$max_epoch, but the run has only $NUM_EPOCHS epochs (an iteration is being logged as an epoch)"
+(( max_step <= STEPS_PER_EPOCH )) ||
+    fail "log lines report step=$max_step, beyond the $STEPS_PER_EPOCH steps per epoch of this run"
+iterations_logged="$(sort -u <<<"$prefixes" | grep -c 'epoch=[1-9]')"
+(( iterations_logged == NUM_EPOCHS * STEPS_PER_EPOCH )) ||
+    fail "expected $((NUM_EPOCHS * STEPS_PER_EPOCH)) distinct epoch/step positions in the log, found $iterations_logged"
+# The run counter itself belongs to the whole run and is recorded once, not per line.
+grep -q "START experiment .* run=${RUN}\b" "$LOG" ||
+    fail "the results log never records the run counter (run=$RUN)"
+echo "[backend-smoke] log positions: $iterations_logged epoch/step pairs, epoch<=$NUM_EPOCHS, step<=$STEPS_PER_EPOCH, run=$RUN recorded"
 # A mode that silently ran the other sequence would still produce a plausible log, so the
 # phases it must not run are checked too.
 if [[ "$MODE" == baseline ]]; then

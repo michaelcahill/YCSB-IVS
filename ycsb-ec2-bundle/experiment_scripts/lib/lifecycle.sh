@@ -188,7 +188,11 @@ binding_db_params() {
 run_with_metrics() {
     local db_name=$1
     local phase=$2
-    local epoch=$3
+    # Which measurement this is: the global iteration for a measured phase, 0 for the load
+    # phases. It is deliberately NOT called `epoch` — log() reads the global epoch, and shadowing
+    # it with an iteration mislabelled every line emitted while a phase ran (including the ones
+    # this function logs itself).
+    local sample_epoch=$3
     local output_csv=$4
     shift 4
 
@@ -222,7 +226,7 @@ run_with_metrics() {
         DB_USERNAME="$DB_USERNAME" \
         db_name="$db_name" \
         phase="$phase" \
-        epoch="$epoch" \
+        epoch="$sample_epoch" \
         metrics_file="$metrics_file" \
         DB_STATS_FILE="$db_stats_file" \
         PG_1S_FILE="$pg_1s_file" \
@@ -247,7 +251,7 @@ run_with_metrics() {
     set +e
     # Underscore-separated: `javagc-run1-reference-3.log` cannot be split into run/phase/epoch
     # without knowing that the phase name itself contains a dash.
-    JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc_run${RUN}_${phase}_epoch${epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
+    JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc_run${RUN}_${phase}_epoch${sample_epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
     "$@" > "$output_csv"
     status=$?
     set -e
@@ -262,7 +266,7 @@ run_with_metrics() {
     fi
 
     log "END YCSB $phase status=$status duration=$((SECONDS-started))s"
-    echo "Finished $db_name phase=$phase epoch=$epoch (exit=$status)"
+    echo "Finished $db_name phase=$phase epoch=$sample_epoch (exit=$status)"
 
     # A failed phase must not be reported as a successful measurement.
     if (( status != 0 )); then
@@ -328,11 +332,13 @@ experiment_bootstrap() {
 # The initial load of the measured database. It also writes the results CSV header, so every
 # mode calls it exactly once, before its loop.
 run_load_phase() {
-    log "=== Executing the load phase ==="
+    # Context first, then any log line: a message logged before the context is set carries the
+    # context of whatever ran last.
     phase="load"
     epoch=0
     step=0
     iteration=0
+    log "=== Executing the load phase ==="
 
     # Values later phases need from the template, before any overlay is applied.
     original_operationcount="${operationcount_override:-$(workload::get_value "$WORKLOAD_FILE" operationcount)}"
@@ -341,7 +347,7 @@ run_load_phase() {
     workload::apply_context "$WORKLOAD_PHASE"
     binding_db_params "$DB_URL"
 
-    run_with_metrics "$DB_NAME" "$phase" "$step" "$OUTPUT_CSV" \
+    run_with_metrics "$DB_NAME" "$phase" 0 "$OUTPUT_CSV" \
         "$YCSB" load "$YCSB_BINDING" -s \
         -P "$WORKLOAD_PHASE" \
         -P "$JDBC_PROPERTIES" \
@@ -362,7 +368,7 @@ run_reference_load_phase() {
     WORKLOAD_PHASE="$(workload::generate reference-load 0)"
     workload::apply_context "$WORKLOAD_PHASE"
     binding_db_params "$UNCHANGED_DB_URL"
-    run_with_metrics "$UNCHANGED_DB_NAME" "$phase" "$step" "$OUTPUT_CSV" \
+    run_with_metrics "$UNCHANGED_DB_NAME" "$phase" 0 "$OUTPUT_CSV" \
         "$YCSB" load "$YCSB_BINDING" -s \
         -P "$WORKLOAD_PHASE" -P "$JDBC_PROPERTIES" \
         "${DB_PARAMS[@]}" \
@@ -376,10 +382,11 @@ run_reference_load_phase() {
 # feed both the histogram that gives later phases extended-size values and the value-size CSV
 # that is one of this harness's two primary artefacts.
 run_extend_phase() {
+    phase="extend"
+
     # Extend phase settings go into a generated workload file, never back into
     # the template.
     log "=== Generating the extend workload ==="
-    phase="extend"
 
     # The extend phase is measured *with* background maintenance running: growing values and
     # having the database clean up after itself is the situation under study. Later phases ask
@@ -466,6 +473,9 @@ merge_value_sizes() {
 # it at all is the VACUUM setting.
 vacuum_if_enabled() {
     if (( vacuum == 1 )) && registry::capability supports_vacuum; then
+        # Its own step between extend and the measured phase, so its log lines are not charged to
+        # the extend phase that just finished.
+        phase="vacuum"
         backend::vacuum "$DB_NAME"
     fi
 }
@@ -545,6 +555,8 @@ run_measured_phase() {
 # The same measured workload against the reference database, whose values never grew: that
 # difference is the cost of value growth itself.
 run_reference_phase() {
+    phase="reference"
+
     snapshot_keys "$UNCHANGED_DB_NAME"
 
     # Wait for the server to settle before measuring the reference database: work left over
@@ -557,7 +569,6 @@ run_reference_phase() {
     set_maintenance_mode off "$DB_NAME"
 
     # Reference workload with unchanging value sizes
-    phase="reference"
     WORKLOAD_PHASE="$(workload::generate reference "$iteration")"
     workload::apply_context "$WORKLOAD_PHASE"
     binding_db_params "$UNCHANGED_DB_URL"
@@ -679,6 +690,8 @@ run_comparison_phases() {
 # The completion marker finish_logging requires: a run that returns without it is reported as
 # a failure, whatever its exit status says.
 experiment_complete() {
+    phase="complete"
+
     # Never hand back a database with its background maintenance switched off by us: the next
     # run of the same databases would start paused without anyone asking.
     if [[ "${MAINTENANCE_MODE_STATE:-}" == off ]]; then
@@ -752,6 +765,9 @@ run_experiment_mainline() {
             if (( COMPARISON_INTERVAL > 0 && iteration % COMPARISON_INTERVAL == 0 )); then
                 run_comparison_phases
             fi
+
+            # No phase is running any more, so say so rather than blaming the last one.
+            phase="iteration-end"
             pause_if_requested
             log "END iteration"
         done

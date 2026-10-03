@@ -219,6 +219,15 @@ if [[ -z "$LOG_FILE" || -z "$RESULT_CSV" ]]; then
     exit 1
 fi
 
+# A log line is positioned by the epoch and the step within it — checked in full by
+# tests/smoke_backend.sh, and here at least for the field that a shadowed variable once filled
+# with the global iteration instead.
+max_epoch="$(grep -o '\[epoch=[0-9]\+' "$LOG_FILE" | cut -d= -f2 | sort -n | tail -1)"
+if (( ${max_epoch:-0} > NUM_EPOCHS )); then
+    echo "[smoke] FAILED: log lines report epoch=$max_epoch although the run has $NUM_EPOCHS epoch(s)" >&2
+    exit 1
+fi
+
 markers_only "$LOG_FILE" | normalize_log > "$OUT/results.markers.txt"
 normalize_stderr "$WORKDIR/run.out" "$rc" | normalize_log > "$OUT/run.out.txt"
 normalize_csv "$RESULT_CSV" > "$OUT/workload_data.csv"

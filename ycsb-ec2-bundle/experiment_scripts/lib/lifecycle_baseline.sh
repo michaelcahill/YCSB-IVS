@@ -46,6 +46,8 @@ run_experiment_baseline() {
             vacuum_if_enabled
             run_measured_phase
 
+            # No phase is running any more, so say so rather than blaming the last one.
+            phase="iteration-end"
             pause_if_requested
             log "END iteration"
         done

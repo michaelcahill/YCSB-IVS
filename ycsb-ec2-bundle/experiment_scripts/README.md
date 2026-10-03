@@ -238,6 +238,28 @@ The results CSV keeps the authoritative column schema (base columns + the backen
 statistics columns), so `../analysis_scripts/` parse every backend's output. A row whose
 `Return=` is non-zero, or a missing completion marker, means the run is not evidence.
 
+### Reading a run log
+
+Every line is prefixed with where it sits in the experiment:
+
+```text
+[2026-10-03 08:40:52 UTC] [epoch=2 run=3 phase=clean-run] START YCSB clean-run
+                           │       │      └─ phase being executed
+                           │       └─ step *within* that epoch — NOT the --run-id counter,
+                           │          which appears once, in "START experiment … run=<N>"
+                           └─ epoch (the outer loop)
+```
+
+- `epoch=0 run=0` means "before any iteration": `phase=setup`, `load`, `reference-load`.
+- `phase=iteration-end` and `phase=complete` are the boundaries between and after iterations,
+  not measurements; anything else names a phase from the sequence table above.
+- The **results CSV `Epoch` column is the global iteration**
+  (`steps_per_epoch * (epoch - 1) + step`), and so is the `<K>` in
+  `javagc_run<N>_<phase>_epoch<K>.log` — both inherited from the runners this harness replaced,
+  where they were used as an x-axis. That is why `--resume-from N` speaks iterations too.
+  `tests/smoke_backend.sh` fails a run whose log lines report an epoch or step outside the
+  loop bounds of that run.
+
 PostgreSQL runs carry eight statistics columns more than before master's autovacuum runner
 was merged in: `n_tup_ins`, `n_tup_del` and `autoanalyze_count` for both the measured table
 and its TOAST table, and `usertable_relpages`/`usertable_size_in_bytes` with
@@ -390,6 +412,7 @@ backend, not only to the text-array schema:
 | `javagc_run<N>_<phase>_epoch<K>.log` naming | `run_with_metrics`, unchanged for every backend |
 
 Two of its changes were deliberately **not** ported: the `log()` allow-list (this branch logs
-everything — see the comment in `lib/common.sh`) and its `[epoch=<iteration> phase=…]` prefix,
-since `epoch`+`step` in this harness's log lines is strictly more precise than a global
-iteration number.
+everything — see the comment in `lib/common.sh`) and dropping the second field of its log prefix
+for a global iteration number. This harness keeps `epoch`+`step`, which identifies an iteration
+exactly (see "Reading a run log"); master's own runner could not say which epoch an iteration
+belonged to.
