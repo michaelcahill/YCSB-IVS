@@ -14,6 +14,7 @@ DB_NAME="${DB_NAME:-ycsb}"
 BACKUP_DB_NAME="${BACKUP_DB_NAME:-ycsb_backup}"
 UNCHANGED_DB_NAME="${UNCHANGED_DB_NAME:-ycsb_unchange}"
 TARGET_TABLE="${TARGET_TABLE:-usertable}"
+PGDATA_PATH=$(sudo -u postgres psql -d postgres -At -c "SHOW data_directory;")
 
 # PostgreSQL endpoint shared by JDBC and CLI commands
 DB_HOST="${DB_HOST:-127.0.0.1}"
@@ -41,6 +42,7 @@ vacuum=0
 NUM_EPOCHS=${NUM_EPOCHS:-10}
 STEPS_PER_EPOCH=${STEPS_PER_EPOCH:-10}
 COMPARISON_INTERVAL=${COMPARISON_INTERVAL:-1}
+RESUME_FROM_EPOCH=-1 # set to between 1 and NUM_EPOCHS*STEPS_PER_EPOCH to resume an experiment
 
 # Define execution ID for this run, based on UTC timestamp and process ID
 EXECUTION_ID="$(date -u +%Y%m%dT%H%M%SZ)_$$"
@@ -109,28 +111,28 @@ global_metric_names=(
 )
 
 table_metric_names=(
-    n_tup_upd n_live_tup n_dead_tup n_ins_since_vacuum vacuum_count autovacuum_count
-    total_vacuum_time total_autovacuum_time total_analyze_time total_autoanalyze_time
-)
-
-relsize_metric_names=(
-    relation_name relation_type raw_rel_size relation_size
+    n_tup_ins n_tup_upd n_tup_del n_live_tup n_dead_tup n_ins_since_vacuum vacuum_count autovacuum_count
+    total_vacuum_time total_autovacuum_time autoanalyze_count total_autoanalyze_time total_analyze_time
 )
 
 binding_field_names=("${global_metric_names[@]}")
-
 for prefix in usertable toast; do
     for metric in "${table_metric_names[@]}"; do
         binding_field_names+=("${prefix}_${metric}")
     done
 done
-
-binding_field_names+=(toast_n_tup_ins toast_n_tup_del)
-
 binding_field_names+=(
     usertable_heap_blks_read usertable_heap_blks_hit usertable_idx_blks_read usertable_idx_blks_hit
     toast_blks_read toast_blks_hit tidx_blks_read tidx_blks_hit
+	usertable_relpages usertable_size_in_bytes
+	toast_relpages toast_size_in_bytes
 )
+
+# for second user-readable query to check for relation sizes
+relsize_metric_names=(
+    relation_name relation_type relpages raw_rel_size relation_size
+)
+
 
 pg_cli() {
     local tool="$1"
@@ -179,18 +181,21 @@ collect_postgres_metrics() {
             done
         done
 
-        extra_select+=", t.n_tup_ins, t.n_tup_del"
-
         # toast_* and tidx_* belong to the PARENT row, not the TOAST row.
         extra_select+=", io.heap_blks_read, io.heap_blks_hit, io.idx_blks_read, io.idx_blks_hit,
                          io.toast_blks_read, io.toast_blks_hit, io.tidx_blks_read, io.tidx_blks_hit"
+        # finally add usertable and toast table sizes
+        extra_select+=", rc.relpages AS usertable_relpages, pg_relation_size(rc.oid) AS usertable_size_in_bytes,
+                         rt.relpages AS toast_relpages, pg_relation_size(rt.oid) AS toast_size_in_bytes"
+        
         # Resolve schema-qualified usertable, then follow reltoastrelid. TOAST
         # names/OIDs change when the comparison DB is recreated or restored.
         extra_joins="
-        JOIN pg_catalog.pg_class AS r ON r.oid = to_regclass('public.usertable')
-        JOIN pg_catalog.pg_stat_all_tables AS u ON u.relid = r.oid
-        JOIN pg_catalog.pg_stat_all_tables AS t ON t.relid = r.reltoastrelid
-        JOIN pg_catalog.pg_statio_all_tables AS io ON io.relid = r.oid"
+        JOIN pg_catalog.pg_class AS rc ON rc.oid = to_regclass('public.usertable')
+        JOIN pg_catalog.pg_stat_all_tables AS u ON u.relid = rc.oid
+        JOIN pg_catalog.pg_stat_all_tables AS t ON t.relid = rc.reltoastrelid
+        JOIN pg_catalog.pg_statio_all_tables AS io ON io.relid = rc.oid
+        JOIN pg_catalog.pg_class AS rt ON rt.oid = rc.reltoastrelid"
     fi
     log "START statistics snapshot database=$db scope=$scope"
     # Capture the exit status BEFORE read: read <<< $(psql ...) hides SQL errors.
@@ -235,7 +240,8 @@ collect_postgres_metrics() {
     done
     log "DB statistics $dbmetrics"
 
-	# check for relation sizes too
+	# check for relation sizes for separate logfile output (CSV captures main vals too)
+	# not really needed for CSV output, just nicer debug output in logfile
     if ! size_output=$(pg_exec -d "$db" -At -F '|' -c "
         SELECT c.relname AS relation_name,
  				CASE c.relkind
@@ -248,6 +254,7 @@ collect_postgres_metrics() {
   			      WHEN 'I' THEN 'partitioned_index'
    			     ELSE c.relkind::text
   			  END AS relation_type,
+  			c.relpages,
     		pg_relation_size(c.oid) raw_rel_size,
 		    pg_size_pretty(pg_relation_size(c.oid)) AS relation_size
 		FROM pg_catalog.pg_class AS c
@@ -392,18 +399,21 @@ stats_header="CPU,Memory,$(IFS=','; echo "${binding_field_names[*]}")"
 # stderr keeps diagnostics out of captured SQL results and raw YCSB CSV.
 log() {
     case "$*" in
-        "START experiment "*|"END experiment "*|\
+        "START experiment "*|"END experiment "*|"PAUSE experiment "*|\
         "START preflight"|"END preflight"|\
         "START statistics"*|"END statistics"*|"DB statistics"*|\
+        "START metrics"*|"END metrics"*|\
         "START YCSB "*|"END YCSB "*|\
         "START VACUUM"*|"END VACUUM"*|\
         "START WAIT"*|"END WAIT"*|"TIMEOUT WAIT"*|"WAITING"*|\
+        "ALTER TABLE"*|\
         "Initializing PostgreSQL database "*|"Done initializing "*|\
         "Backing up the database started"|"Backing up the database finished"|\
         "Log file: "*|"Result CSV: "*|"Download this log from EC2: "*|\
+        "=== All steps completed"*|\
         *ERROR*|*WARNING*|Warning:*)
-            printf '[epoch=%s run=%s phase=%s] %s\n' \
-                "${epoch:-0}" "${step:-0}" "${phase:-setup}" "$*" >&2
+            printf '[epoch=%s phase=%s] %s\n' \
+                "${iteration:-0}" "${phase:-setup}" "$*" >&2
             ;;
         *)
             return 0
@@ -416,7 +426,6 @@ start_logging() {
 
     mkdir -p "$(dirname "$LOG_FILE")"
     LOG_FILE="$(cd "$(dirname "$LOG_FILE")" && pwd)/$(basename "$LOG_FILE")"
-    : > "$LOG_FILE"
 
     LOGGER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ycsb-logger.XXXXXX")
     if ! mkfifo "$LOGGER_DIR/stream"; then
@@ -487,6 +496,34 @@ finish_logging() {
     exit "$rc"
 }
 
+log_recent_autovacuum()
+{
+    local database="${1:-$DB_NAME}"
+    local logfile loglines vacuum_start autovac_lines autovac_line log_time age
+
+    logfile=$(sudo -u postgres psql -d "$database" -At -c \
+        "SELECT pg_current_logfile();") || {
+        log "ERROR: Failed to determine PostgreSQL logfile"
+        return 1
+    }
+
+    # if pg_current_logfile() returned a relative path, prepend PGDATA_PATH to log dir
+    [[ "$logfile" = /* ]] || logfile="$PGDATA_PATH/$logfile"
+
+    # if last entry in psql logfile is recent(!) statistics of an autovacuum, log this
+    loglines=$(sudo tail -50 "$logfile")
+    vacuum_start=$(grep -n "LOG:  automatic vacuum" <<< "$loglines" | tail -1 | cut -d: -f1) || return 0
+    if [[ -n "$vacuum_start" ]]; then
+        autovac_lines=$(sed -n "${vacuum_start},$((vacuum_start+11))p" <<< "$loglines")
+        autovac_line=$(head -1 <<< "$autovac_lines")
+        log_time=$(date -u -d "${autovac_line:0:19} UTC" +%s 2>/dev/null) || return 0
+        age=$(( $(date -u +%s) - log_time ))
+        if (( age <= 60 )); then
+            log "DB statistics of recent autovacuum age=${age}s: ${autovac_lines//$'\n'/'; '}"
+        fi
+    fi
+}
+
 wait_for_idle_postgres() {
     local database="${1:-$DB_NAME}"
     local interval="${2:-20}"
@@ -515,6 +552,7 @@ wait_for_idle_postgres() {
        		"SELECT backend_type, query, query_start, wait_event, state FROM pg_stat_activity WHERE state != 'idle' AND pid != pg_backend_pid();")
 	    if [[ -z "$active_backends" ]]; then
 			log "END WAIT FOR IDLE POSTGRES duration=$((SECONDS-idle_wait_started))s"
+			log_recent_autovacuum
 	       	break
     	fi
     	active_count=$(grep -c '^' <<< "$active_backends")
@@ -532,12 +570,13 @@ run_ycsb() {
     local label="$1"
     local epoch="$2"
     local details_file started=$SECONDS rc=0
-    shift
+    shift 2
 
     details_file="$(dirname "$LOG_FILE")/stepdetail_logs/$(basename "$LOG_FILE" ".log")_epoch${epoch:-0}_${label}.log"
     mkdir -p "$(dirname "$details_file")"
 
     log "START YCSB $label"
+	pg_exec -q -d "$DB_NAME" -c "SELECT experiment_log('EXPERIMENT RUN=${RUN} EPOCH=${epoch} PHASE=${label}');" >/dev/null
 
     # Preserve raw output for CSV parsing and retain a separate detailed file.
     # Do not copy it into the main experiment log.
@@ -562,7 +601,12 @@ run_with_metrics() {
     local output_csv=$4
     local rc=0
     local started=$SECONDS
+    local metrics_file=""
+    local db_stats_file=""
+    local disk_stats_file=""
     local pg_1s_file=""
+    local os_1s_file=""
+    local details_file=""
     local run_buffer_sampler_pid=""
     local operation_count=""
     local wal_start_lsn=""
@@ -575,7 +619,7 @@ run_with_metrics() {
     os_1s_file="${LOG_DIR}/${db_name}_${EXPERIMENT_NAME}_${phase}.osstats"
     details_file="$(dirname "$LOG_FILE")/stepdetail_logs/$(basename "$LOG_FILE" ".log")_epoch${epoch:-0}_${phase}.log"
 
-    echo "Starting metrics collection for $db_name"
+    log "START metrics collection for $db_name"
     mkdir -p "${LOG_DIR}"
     mkdir -p "$(dirname "$details_file")"
     mkdir -p "${LOG_DIR}/javagc"
@@ -602,10 +646,11 @@ run_with_metrics() {
     trap "kill -TERM -$watcher_pid 2>/dev/null" EXIT INT TERM
 
     log "START YCSB $phase"
+	pg_exec -q -d "$DB_NAME" -c "SELECT experiment_log('EXPERIMENT RUN=${RUN} EPOCH=${epoch} PHASE=${phase}');" >/dev/null
 
 	# execute ycsb program including JAVA_OPTS to log garbage collector
 	started=$SECONDS
-	JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc-run${RUN}-${phase}-${epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
+	JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc_run${RUN}_${phase}_epoch${epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
     "$@" 2>&1 | tee "$output_csv" "$details_file" > /dev/null || rc=$?
 
     log "END YCSB $phase status=$rc duration=$((SECONDS-started))s"
@@ -619,7 +664,7 @@ run_with_metrics() {
 
     trap - EXIT INT TERM
 
-    echo "Finished $db_name phase=$phase epoch=$epoch (exit=$rc)"
+    log "END metrics collection $db_name phase=$phase epoch=$epoch (exit=$rc)"
     set -e
 }
 
@@ -637,6 +682,21 @@ initialize_database() {
             field0 TEXT[], field1 TEXT[], field2 TEXT[], field3 TEXT[], field4 TEXT[],
             field5 TEXT[], field6 TEXT[], field7 TEXT[], field8 TEXT[], field9 TEXT[]
         );"
+
+    # utility SQL function to log messages in the postgresql logfile itself
+    # temporarily disable any annoying CONTEXT and STATEMENT log lines (PSQL 15+)
+    sudo -u postgres psql -d "$DB_NAME" -q -c "
+        GRANT SET ON PARAMETER log_min_error_statement TO \"$DB_USERNAME\";
+        GRANT SET ON PARAMETER log_error_verbosity     TO \"$DB_USERNAME\";"
+    pg_exec -d "$db_name" -c \
+        "CREATE OR REPLACE FUNCTION experiment_log(msg text) RETURNS void
+        AS \$\$
+        BEGIN               
+            RAISE LOG '%', msg;
+        END;
+        \$\$ LANGUAGE plpgsql
+        SET log_min_error_statement = 'panic'  -- Applied on entry, restored on exit
+        SET log_error_verbosity = 'terse';"
 
     log "Done initializing $db_name."
 }
@@ -717,6 +777,51 @@ close_db() {
     log "PostgreSQL backend: no manual DB close required."
 }
 
+archive_experiment_configuration()
+{
+    local config_dir="${EXPERIMENT_DIR}/config"
+    local pglog_dir="${LOG_DIR}/postgresql_logs"
+    local logfile
+
+    log "START experiment configuration archive"
+
+    mkdir -p "$config_dir" || return 1
+    mkdir -p "$pglog_dir" || return 1
+
+    #
+    # Copy experiment configuration files
+    #
+    cp "$0" "$config_dir/"
+    cp "${SCRIPT_DIR}/watcher.sh" "$config_dir/"
+    cp "${SCRIPT_DIR}/../bin/bindings.properties" "$config_dir/"
+    cp "$WORKLOAD_FILE" "$config_dir/"
+
+    #
+    # Archive PostgreSQL configuration
+    #
+    if sudo cp -p "${PGDATA_PATH}/postgresql.conf" "$config_dir/"; then
+        sudo chmod a+r "$config_dir/postgresql.conf"
+    else
+        log "WARNING: Failed to archive postgresql.conf"
+    fi
+
+    #
+    # Archive PostgreSQL weekday log files
+    # not sure which one we need - log may have rotated while script was running...
+    #
+    for day in Mon Tue Wed Thu Fri Sat Sun; do
+        logfile="${PGDATA_PATH}/log/postgresql-${day}.log"
+
+        sudo test -f "$logfile" || continue
+        if sudo grep -q "EXPERIMENT RUN=${RUN}" "$logfile"; then
+            sudo rsync -a "$logfile" "$pglog_dir/" || continue
+            sudo chmod a+r "$pglog_dir/"$(basename "${logfile}")
+        fi
+    done
+
+    log "END experiment configuration archive config_dir=$config_dir log_dir=$pglog_dir"
+}
+
 # Function to append values for the first iteration
 append_first_iteration() {
     local key_size_log="$1"
@@ -782,6 +887,10 @@ postgres_preflight true "$DB_NAME" "$UNCHANGED_DB_NAME" "$BACKUP_DB_NAME"
 log "END preflight"
 mkdir -p "$(dirname "$OUTPUT_FILE")" "$(dirname "$KEY_SIZE_FILE_AFTER_EXTEND")"
 
+# -----------------------------------------------------------------------------------
+# only do the initial load phase if we are not resuming from some previous epoch runs
+if (( $RESUME_FROM_EPOCH <= 0 )); then
+
 # Clear the log file and previous backups
 > $PLAN_LOG
 > $HISTOGRAM_FILE
@@ -839,6 +948,9 @@ run_with_metrics "$UNCHANGED_DB_NAME" "$phase" "$step" "$OUTPUT_CSV" \
 total_size_reference_load=$(pg_exec -d "$UNCHANGED_DB_NAME" -At -F"," -c "SELECT SUM(octet_length(coalesce(array_to_string(field0, ''), '')) + octet_length(coalesce(array_to_string(field1, ''), '')) + octet_length(coalesce(array_to_string(field2, ''), '')) + octet_length(coalesce(array_to_string(field3, ''), '')) + octet_length(coalesce(array_to_string(field4, ''), '')) + octet_length(coalesce(array_to_string(field5, ''), '')) + octet_length(coalesce(array_to_string(field6, ''), '')) + octet_length(coalesce(array_to_string(field7, ''), '')) + octet_length(coalesce(array_to_string(field8, ''), '')) + octet_length(coalesce(array_to_string(field9, ''), ''))) FROM usertable;")
 log "Reference-load verification - TotalSize:$total_size_reference_load ExpectedFieldLength:$fieldlengthoriginal"
 
+fi # $RESUME_FROM_EPOCH
+# -----------------------------------------------------------------------------------
+
 # Save original operationcount before modifying it
 original_operationcount=$(grep -E '^operationcount=' "$WORKLOAD_FILE" | cut -d'=' -f2)
 
@@ -847,6 +959,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
     for step in $(seq 1 "$STEPS_PER_EPOCH"); do
 
         iteration=$((STEPS_PER_EPOCH*($epoch-1)+$step))
+         (( iteration >= RESUME_FROM_EPOCH )) || continue
 
         # Setting parameter values for extend phase
         log "=== Setting parameter values for extend phase ==="
@@ -874,8 +987,16 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         extendproportion=${extendproportion:-""}
 
         # Execute the extend phase
-        log "=== Executing the extend phase with extendproportion=1 and other proportions=0 ==="
+        log "=== Executing the extend phase ==="
         phase="extend"
+        
+        # (re-)enable auto-vacuum for usertable (only if no manual vacuum)
+        if (( $vacuum == 0 )); then
+        	autovacuum_on_cmd="ALTER TABLE usertable RESET (autovacuum_enabled);"
+        	log "$autovacuum_on_cmd"
+	        pg_exec -d "$DB_NAME" -c "${autovacuum_on_cmd}" 2>&1
+	    fi
+
         # Capture both stdout and stderr to capture status messages
         run_with_metrics "$DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
             "$YCSB" run "$YCSB_BINDING" -s \
@@ -942,8 +1063,6 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         get_key_sizes $KEY_SIZE_LOG $HISTOGRAM_FILE
 
         # Check if the output file exists, if not, create it with headers
-        iteration=$((STEPS_PER_EPOCH*($epoch-1)+$step))
-
         if [[ ! -f "$KEY_SIZE_FILE_AFTER_EXTEND" ]]; then
             # Add header row
             echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_EXTEND"
@@ -959,7 +1078,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         if [[ $vacuum -eq 1 ]]; then
             vacuum_started=$SECONDS
             vacuum_rc=0
-            vacuum_log="vacuum_logs/${LOG_FILE%.log}_iteration${iteration}_epoch${epoch}_step${step}_vacuum.raw.log"
+            vacuum_log="${LOG_DIR}/vacuum_logs/${LOG_FILE%.log}_epoch${iteration}_vacuum.raw.log"
             mkdir -p "$(dirname "$vacuum_log")"
 
             log "START VACUUM ANALYZE database=$DB_NAME"
@@ -1087,11 +1206,16 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         -c "SELECT ycsb_key
             FROM usertable;" > keys_before_run.txt
 
-		# wait for all backend processes to finish before doing clean run (max 20 mins)
-		wait_for_idle_postgres "$DB_NAME" 20 1200
-
         # Reference workload with unchanging value sizes
         phase="reference"
+
+        # wait for all backend processes to finish before doing reference run (max 2 h)
+        wait_for_idle_postgres "$DB_NAME" 30 7200
+        # disable auto-vacuum on usertable for following phases
+      	autovacuum_off_cmd="ALTER TABLE usertable SET (autovacuum_enabled=false);"
+       	log "$autovacuum_off_cmd"
+        pg_exec -d "$DB_NAME" -c "${autovacuum_off_cmd}" 2>&1
+
         run_with_metrics "$UNCHANGED_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
         "$YCSB" run "$YCSB_BINDING" -s \
         -P "$WORKLOAD_FILE" \
@@ -1125,17 +1249,20 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
 
         rm -rf keys_after_run.txt keys_before_run.txt keys_before_sorted.txt keys_after_sorted.txt keys_to_delete.txt
 
-        # if (( $((STEPS_PER_EPOCH*($epoch-1)+$step)) % 1 == 0 )); then
         if (( COMPARISON_INTERVAL > 0 && iteration % COMPARISON_INTERVAL == 0 )); then
             phase="clean-run"
 
             log "Backing up the database started"
-            RESTORE_LOG="${LOG_DIR}/restore_logs/${EXPERIMENT_NAME}_iteration${iteration}_epoch${epoch}_step${step}_restore.log"
+            RESTORE_LOG="${LOG_DIR}/restore_logs/${EXPERIMENT_NAME}_epoch${iteration}_restore.log"
             restore_comparison_database
             log "Backing up the database finished"
 
 			# wait for all backend processes to finish before doing clean run (max 20 mins)
 			wait_for_idle_postgres "$DB_NAME" 20 1200
+	        # disable auto-vacuum on usertable for following phases
+      		autovacuum_off_cmd="ALTER TABLE usertable SET (autovacuum_enabled=false);"
+    	   	log "$autovacuum_off_cmd"
+	        pg_exec -d "$DB_NAME" -c "${autovacuum_off_cmd}" 2>&1
 
 			run_with_metrics "$BACKUP_DB_NAME" "$phase" "${iteration}" "$OUTPUT_CSV" \
                 "$YCSB" run "$YCSB_BINDING" -s \
@@ -1175,7 +1302,6 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
             log "END size computation database=$BACKUP_DB_NAME"
 
             # Check if the output file exists, if not, create it with headers
-            iteration=$((STEPS_PER_EPOCH*($epoch-1)+$step))
             if [[ ! -f "$KEY_SIZE_FILE_AFTER_RUN" ]]; then
                 # Add header row
                 echo "Key,Run$iteration" > "$KEY_SIZE_FILE_AFTER_RUN"
@@ -1266,7 +1392,7 @@ for epoch in $(seq 1 "$NUM_EPOCHS"); do
         fi
         log "END iteration"
         # chance to pause script after an iteration, eg. for maintenance, with 'touch PAUSE_SCRIPT'
- 		while [[ -e "PAUSE_SCRIPT" ]]; do echo "experiment paused..."; sleep 30; done
+ 		while [[ -e "PAUSE_SCRIPT" ]]; do echo "PAUSE experiment paused..."; sleep 30; done
      done
 done
 
@@ -1274,6 +1400,10 @@ done
 # rm -rf $LOG_FILE
 # rm -rf $OUTPUT_CSV
 # rm -rf $KEY_SIZE_LOG
+
+# save config and log files
+pg_exec -q -d "$DB_NAME" -c "SELECT experiment_log('EXPERIMENT RUN=${RUN} END');" >/dev/null
+archive_experiment_configuration
 
 log "=== All steps completed. Results are logged in $LOG_FILE ==="
 EXPERIMENT_COMPLETED=1
