@@ -44,6 +44,32 @@ import java.util.Vector;
  */
 public abstract class DB {
   /**
+   * Selects which extend() implementation a binding uses. {@code true} (the
+   * default) lets the binding push the append down into the datastore, if it
+   * knows how; {@code false} forces the client-side implementation defined by
+   * {@link #extend(String, String, Map, long)}.
+   */
+  public static final String EXTEND_SERVER_SIDE_PROPERTY = "extend.serverside";
+
+  /**
+   * Default for {@link #EXTEND_SERVER_SIDE_PROPERTY}: bindings use their
+   * server-side extend when they have one.
+   */
+  public static final boolean EXTEND_SERVER_SIDE_PROPERTY_DEFAULT = true;
+
+  /**
+   * Reads {@link #EXTEND_SERVER_SIDE_PROPERTY} for the benefit of bindings that
+   * have no boolean property helper of their own.
+   *
+   * @param p The DB properties
+   * @return true when the binding should push extends into the datastore
+   */
+  protected static boolean isServerSideExtend(Properties p) {
+    return Boolean.parseBoolean(p.getProperty(EXTEND_SERVER_SIDE_PROPERTY,
+        Boolean.toString(EXTEND_SERVER_SIDE_PROPERTY_DEFAULT)));
+  }
+
+  /**
    * Properties for configuring this DB.
    */
   private Properties properties = new Properties();
@@ -114,11 +140,23 @@ public abstract class DB {
   public abstract Status update(String table, String key, Map<String, ByteIterator> values);
 
   /**
-   * Extend fields in the database.
+   * Extend fields in the database: append the given value to what the field
+   * already holds, as long as the field stays below {@code maxfieldlength}.
+   *
+   * <p>This is the <em>client-side</em> implementation of the operation - it
+   * reads the field, concatenates in the client and writes the whole value back,
+   * so the current value crosses the wire twice. Bindings that can append inside
+   * the datastore override this method; they are expected to keep the rule below
+   * (append if and only if {@code len(current) + len(append) < maxfieldlength},
+   * never truncate) so both implementations leave identical data, and honour
+   * {@link #EXTEND_SERVER_SIDE_PROPERTY} to let the caller pick which one runs.
    *
    * @param table The name of the table
    * @param key The record key of the record to write.
    * @param values A HashMap of field/value pairs to update in the record
+   * @param maxfieldlength Append only while the field stays below this length;
+   *                       a non positive value means never append (matching the
+   *                       comparison above)
    * @return The result of the operation.
    */
   public Status extend(String table, String key, Map<String, ByteIterator> values, long maxfieldlength) {

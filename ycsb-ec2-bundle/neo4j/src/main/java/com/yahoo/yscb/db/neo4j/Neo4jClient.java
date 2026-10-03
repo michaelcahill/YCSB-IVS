@@ -19,6 +19,9 @@ public class Neo4jClient extends DB {
   private Neo4jConnection conn;
   private Neo4jConfig config;
 
+  /** True (default) to append inside the database, false to use DB.extend(). */
+  private boolean extendServerSide;
+
   @Override
   public void init() throws DBException {
     Properties props = getProperties();
@@ -27,6 +30,7 @@ public class Neo4jClient extends DB {
     String username = props.getProperty("username");
     String password = props.getProperty("password");
 
+    extendServerSide = isServerSideExtend(props);
     config = new Neo4jConfig(url, username, password);
     conn = new Neo4jConnection(config);
   }
@@ -51,6 +55,40 @@ public class Neo4jClient extends DB {
   public Status update(String table, String key, Map<String, ByteIterator> values) {
     try {
       return conn.update(table, key, values);
+    } catch (Exception e) {
+      return Status.ERROR;
+    }
+  }
+
+  /**
+   * Extend one field of a node.
+   *
+   * <p>Two implementations, selected by {@code -p extend.serverside} (default
+   * {@code true}):
+   * <ul>
+   * <li><b>server side</b> - one Cypher statement appends inside Neo4j, so the value
+   * being grown never reaches the client.</li>
+   * <li><b>client side</b> - {@link DB#extend(String, String, Map, long)}: read,
+   * concatenate here, write the whole property back.</li>
+   * </ul>
+   * Both append if and only if {@code len(current) + len(append) < maxfieldlength},
+   * so they leave identical data.
+   */
+  @Override
+  public Status extend(String table, String key, Map<String, ByteIterator> values, long maxfieldlength) {
+    if (values == null || values.isEmpty()) {
+      return Status.BAD_REQUEST;
+    }
+
+    if (!extendServerSide) {
+      // Client-side extend: read/concatenate/update through the generic interface.
+      return super.extend(table, key, values, maxfieldlength);
+    }
+
+    try {
+      Map.Entry<String, ByteIterator> entry = values.entrySet().iterator().next();
+      String appendValue = entry.getValue() == null ? "" : entry.getValue().toString();
+      return conn.extend(table, key, entry.getKey(), appendValue, maxfieldlength);
     } catch (Exception e) {
       return Status.ERROR;
     }

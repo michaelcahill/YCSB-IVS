@@ -20,7 +20,9 @@ package site.ycsb.db;
 import static org.junit.Assert.*;
 
 import site.ycsb.ByteIterator;
+import site.ycsb.DB;
 import site.ycsb.DBException;
+import site.ycsb.Status;
 import site.ycsb.StringByteIterator;
 import org.junit.*;
 
@@ -269,6 +271,105 @@ public class JdbcDBClientTest {
         for (String field: readFields) {
             assertEquals("Assert " + field + " was read correctly", insertMap.get(field).toString(), readResultMap.get(field).toString());
         }
+    }
+
+    /*
+        Builds a second client against the same in-memory database, pinned to one extend
+        implementation (true = append inside the database, false = DB.extend()).
+     */
+    private JdbcDBClient clientForExtendMode(boolean serverSide) throws DBException {
+        JdbcDBClient client = new JdbcDBClient();
+        Properties p = new Properties();
+        p.setProperty(JdbcDBClient.CONNECTION_URL, TEST_DB_URL);
+        p.setProperty(JdbcDBClient.DRIVER_CLASS, TEST_DB_DRIVER);
+        p.setProperty(JdbcDBClient.CONNECTION_USER, TEST_DB_USER);
+        p.setProperty(JdbcDBClient.DB_BATCH_SIZE, "1");
+        p.setProperty(JdbcDBClient.JDBC_AUTO_COMMIT, "true");
+        p.setProperty(DB.EXTEND_SERVER_SIDE_PROPERTY, Boolean.toString(serverSide));
+        client.setProperties(p);
+        client.init();
+        return client;
+    }
+
+    private String storedValue(String insertKey, String field) throws SQLException {
+        ResultSet resultSet = jdbcConnection.prepareStatement(
+            String.format("SELECT %s FROM %s WHERE %s = '%s'", field, TABLE_NAME, KEY_FIELD, insertKey)
+                ).executeQuery();
+        assertTrue("Assert the row exists", resultSet.next());
+        String value = resultSet.getString(field);
+        resultSet.close();
+        return value;
+    }
+
+    @Test
+    public void extendAppendsInBothModes() throws Exception {
+      // The default client has no extend.serverside property, so it must be server side.
+      HashMap<String, ByteIterator> serverRow = insertRow("user0");
+      Map<String, ByteIterator> append = new HashMap<String, ByteIterator>();
+      append.put("FIELD1", new StringByteIterator("extended"));
+      assertEquals(Status.OK, jdbcDBClient.extend(TABLE_NAME, "user0", append, 1000));
+      assertEquals("Server-side extend appends to the field",
+          serverRow.get("FIELD1").toString() + "extended", storedValue("user0", "FIELD1"));
+
+      JdbcDBClient clientSide = clientForExtendMode(false);
+      try {
+        HashMap<String, ByteIterator> clientRow = insertRow("user1");
+        assertEquals(Status.OK, clientSide.extend(TABLE_NAME, "user1", append, 1000));
+        assertEquals("Client-side extend leaves the same data as the server-side one",
+            clientRow.get("FIELD1").toString() + "extended", storedValue("user1", "FIELD1"));
+      } finally {
+        clientSide.cleanup();
+      }
+    }
+
+    @Test
+    public void extendStopsAtMaxFieldLengthInBothModes() throws Exception {
+      // DB.extend appends only while len(current) + len(append) < maxfieldlength; the
+      // server-side implementation has to reproduce that rule exactly.
+      insertRow("user0");
+      insertRow("user1");
+      String beforeServer = storedValue("user0", "FIELD1");
+      String beforeClient = storedValue("user1", "FIELD1");
+
+      Map<String, ByteIterator> append = new HashMap<String, ByteIterator>();
+      append.put("FIELD1", new StringByteIterator("extended"));
+
+      // 32 characters already stored + 8 more is not below the limit of 40.
+      assertEquals(Status.OK, jdbcDBClient.extend(TABLE_NAME, "user0", append, FIELD_LENGTH));
+      assertEquals("Server-side extend leaves an over-limit field untouched",
+          beforeServer, storedValue("user0", "FIELD1"));
+
+      JdbcDBClient clientSide = clientForExtendMode(false);
+      try {
+        assertEquals(Status.OK, clientSide.extend(TABLE_NAME, "user1", append, FIELD_LENGTH));
+        assertEquals("Client-side extend leaves an over-limit field untouched",
+            beforeClient, storedValue("user1", "FIELD1"));
+      } finally {
+        clientSide.cleanup();
+      }
+    }
+
+    @Test
+    public void extendMissingKeyInBothModes() throws Exception {
+      insertRow("user0");
+      Map<String, ByteIterator> append = new HashMap<String, ByteIterator>();
+      append.put("FIELD1", new StringByteIterator("extended"));
+
+      assertEquals(Status.NOT_FOUND, jdbcDBClient.extend(TABLE_NAME, "nosuchkey", append, 1000));
+
+      JdbcDBClient clientSide = clientForExtendMode(false);
+      try {
+        assertEquals(Status.NOT_FOUND, clientSide.extend(TABLE_NAME, "nosuchkey", append, 1000));
+      } finally {
+        clientSide.cleanup();
+      }
+    }
+
+    @Test
+    public void extendRejectsEmptyValues() throws Exception {
+      insertRow("user0");
+      assertEquals(Status.BAD_REQUEST, jdbcDBClient.extend(TABLE_NAME, "user0",
+          new HashMap<String, ByteIterator>(), 1000));
     }
 
     @Test

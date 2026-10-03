@@ -64,6 +64,32 @@ The `extend` operation appends a single new array element to one randomly select
 The element length comes from `extendfieldlength` (default 100 bytes).
 `update` still replaces the full array value for the fields you pass.
 
+Two implementations, selected by `extend.serverside` (default `true`):
+
+```sh
+extend.serverside=true    # server side: UPDATE ... SET fieldN =
+                          #   CASE WHEN length(array_to_string(array_append(fieldN, ?), delim)) < max
+                          #        THEN array_append(fieldN, ?) ELSE fieldN END
+extend.serverside=false   # client side: read the array, append the element here, write it back
+```
+
+Both add exactly **one element**, and both apply the same limit: the append happens only while
+the value `read()` returns - the elements joined by `jdbc.array.delimiter` - stays under
+`maxfieldlength`. The pushdown measures that inside PostgreSQL (so the array never leaves the
+server); the client-side path measures the same joined string before writing it back. A field
+at or over the limit keeps its value and still reports `OK`; only a missing row gives
+`NOT_FOUND`.
+
+The server-side append is the default and needs PostgreSQL (it is what `array_append` does
+there); on any other JDBC URL the binding uses the client-side path and says so once at
+startup. Verified against a real PostgreSQL with `TEXT[]` columns: both modes leave identical
+arrays, including exactly where growth stops.
+
+Note that the client-side path here is *not* `DB.extend`'s plain text concatenation - that
+would grow the **last element**, because `read()` joins and `update()` splits. It appends one
+element to the joined text instead, so the array shape survives in both modes. See
+`EXTEND_PLAN.md`.
+
 Run with:
 ```sh
 bin/ycsb load jdbc-array -P workloads/workloada-extend -P db.properties

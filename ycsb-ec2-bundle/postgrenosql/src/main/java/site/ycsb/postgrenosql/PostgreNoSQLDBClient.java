@@ -75,6 +75,9 @@ public class PostgreNoSQLDBClient extends DB {
   /** The field name prefix in the table. */
   public static final String COLUMN_NAME = "YCSB_VALUE";
 
+  /** True (default) to append inside PostgreSQL, false to use DB.extend(). */
+  private boolean extendServerSide;
+
   private static final String DEFAULT_PROP = "";
 
   /** Returns parsed boolean value from the properties if set, otherwise returns defaultVal. */
@@ -89,6 +92,10 @@ public class PostgreNoSQLDBClient extends DB {
   @Override
   public void init() throws DBException {
     INIT_COUNT.incrementAndGet();
+    // Read before the early return below: the shared driver is set up once, but every
+    // client instance needs its own copy of the extend mode.
+    this.extendServerSide = getBoolProperty(getProperties(), EXTEND_SERVER_SIDE_PROPERTY,
+        EXTEND_SERVER_SIDE_PROPERTY_DEFAULT);
     synchronized (PostgreNoSQLDBClient.class) {
       if (postgrenosqlDriver != null) {
         return;
@@ -232,6 +239,66 @@ public class PostgreNoSQLDBClient extends DB {
       return Status.UNEXPECTED_STATE;
     } catch (SQLException e) {
       LOG.error("Error in processing update to table: " + tableName + e);
+      return Status.ERROR;
+    }
+  }
+
+  /**
+   * Extend one field of a document.
+   *
+   * <p>Two implementations, selected by {@code -p extend.serverside} (default
+   * {@code true}):
+   * <ul>
+   * <li><b>server side</b> - one UPDATE with {@code jsonb_set} appends to the
+   * attribute inside PostgreSQL, so the field being grown never leaves the server.</li>
+   * <li><b>client side</b> - {@link DB#extend(String, String, Map, long)}: read,
+   * concatenate here, write the whole document back.</li>
+   * </ul>
+   * Both append if and only if {@code len(current) + len(append) < maxfieldlength},
+   * so they leave identical data; a field at or over the limit is rewritten unchanged
+   * ({@code OK}) and only a missing key gives {@code NOT_FOUND}.
+   *
+   * <p>Values are JSON strings in the {@code YCSB_VALUE} column (that is what
+   * {@link #update(String, String, Map)} writes), so text concatenation with {@code ||}
+   * is all the pushdown needs. The column is declared {@code NOT NULL} by this binding's
+   * schema; a document that lacks the field grows an empty string.
+   */
+  @Override
+  public Status extend(String tableName, String key, Map<String, ByteIterator> values, long maxfieldlength) {
+    if (values == null || values.isEmpty()) {
+      return Status.BAD_REQUEST;
+    }
+
+    if (!extendServerSide) {
+      // Client-side extend: read/concatenate/update through the generic interface.
+      return super.extend(tableName, key, values, maxfieldlength);
+    }
+
+    Map.Entry<String, ByteIterator> entry = values.entrySet().iterator().next();
+    String field = entry.getKey();
+    String appendValue = entry.getValue() == null ? "" : entry.getValue().toString();
+
+    // The increment length and the limit are constants here, so they go into the
+    // statement as literals and only the increment and the key are parameters.
+    String currentJson = COLUMN_NAME + "->>'" + field + "'";
+    String sql = "UPDATE " + tableName + " SET " + COLUMN_NAME + " = jsonb_set(" + COLUMN_NAME
+        + ", '{" + field + "}', to_jsonb(CASE"
+        + " WHEN length(coalesce(" + currentJson + ", '')) + " + appendValue.length()
+        + " < " + maxfieldlength
+        + " THEN coalesce(" + currentJson + ", '') || COALESCE(?, '')"
+        + " ELSE coalesce(" + currentJson + ", '') END), true)"
+        + " WHERE " + PRIMARY_KEY + " = ?";
+
+    try (PreparedStatement extendStatement = connection.prepareStatement(sql)) {
+      extendStatement.setString(1, appendValue);
+      extendStatement.setString(2, key);
+      int result = extendStatement.executeUpdate();
+      if (result == 1) {
+        return Status.OK;
+      }
+      return Status.NOT_FOUND;
+    } catch (SQLException e) {
+      LOG.error("Error in processing extend of table " + tableName + ": " + e);
       return Status.ERROR;
     }
   }
