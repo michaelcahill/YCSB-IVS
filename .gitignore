@@ -22,6 +22,10 @@ output*
 
 # ignore standard Mac OS X files/dirs
 .DS_Store
+
+# ignore compiled Python (tests, analysis helpers)
+__pycache__/
+*.pyc
 /differentbin/
 jdbc-binding/lib/postgresql-42.7.8.jar
 ycsb-ec2-bundle.zip
