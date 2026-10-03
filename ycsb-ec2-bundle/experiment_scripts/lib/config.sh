@@ -107,6 +107,9 @@ config::apply_legacy_names() {
         [EXTENDOPERATIONCOUNT]=EXTEND_OPERATIONCOUNT
         [DIST]=EXTEND_DIST                        # master: extend request distribution
         [WORK]=WORKLOAD                           # master: workload name part
+        # master's RESUME_FROM_EPOCH was compared against the global iteration, so it resumes
+        # by iteration; its -1 (and 0) meant "run everything", which is RESUME_FROM_ITERATION=0.
+        [RESUME_FROM_EPOCH]=RESUME_FROM_ITERATION
     )
     local legacy canonical
     for legacy in "${!legacy_names[@]}"; do
@@ -182,6 +185,55 @@ config::init_defaults() {
     VACUUM_ENABLED="${VACUUM_ENABLED:-0}"
     vacuum="$VACUUM_ENABLED"                    # legacy name still used by the engine
 
+    # --- RESUME ----------------------------------------------------------------
+    # Resume an interrupted run at a global iteration instead of starting over: iterations
+    # below this number are skipped and the initial load / reference-load phases do not run,
+    # so the databases must already hold the state the run left behind. 0 (or 1) runs every
+    # iteration and both load phases.
+    # Artefacts are appended to, never truncated (see experiment::resume_active).
+    RESUME_FROM_ITERATION="${RESUME_FROM_ITERATION:-0}"
+    [[ "$RESUME_FROM_ITERATION" =~ ^-?[0-9]+$ ]] || {
+        echo "[error] RESUME_FROM_ITERATION must be a number of iterations, got: $RESUME_FROM_ITERATION" >&2
+        return 2
+    }
+    (( RESUME_FROM_ITERATION < 0 )) && RESUME_FROM_ITERATION=0   # master's -1 meant "no resume"
+    if (( RESUME_FROM_ITERATION > NUM_EPOCHS * STEPS_PER_EPOCH )); then
+        echo "[error] RESUME_FROM_ITERATION=$RESUME_FROM_ITERATION is past the last iteration"
+        echo "        of this run (NUM_EPOCHS*STEPS_PER_EPOCH=$((NUM_EPOCHS * STEPS_PER_EPOCH)));"
+        echo "        it would execute nothing." >&2
+        return 2
+    fi
+
+    # --- background maintenance between phases ---------------------------------
+    # Turn the database's own background maintenance (PostgreSQL: autovacuum on the measured
+    # table) off before the phases that must be quiet and back on before the extend phase that
+    # is measured with it. 0 leaves the server's settings untouched.
+    PAUSE_MAINTENANCE="${PAUSE_MAINTENANCE:-1}"
+
+    # --- waiting for the server to settle --------------------------------------
+    # How long a phase waits for background work to finish before it is measured, and how often
+    # it asks. One pair for every wait of every phase: an autovacuum on a heavily extended
+    # table can run for well over an hour, and a wait that gives up early measures the phase
+    # while that work is still running.
+    IDLE_WAIT_INTERVAL="${IDLE_WAIT_INTERVAL:-30}"
+    IDLE_WAIT_TIMEOUT="${IDLE_WAIT_TIMEOUT:-7200}"
+
+    # --- pausing between iterations --------------------------------------------
+    # `touch PAUSE_SCRIPT` in the runner's directory stops the experiment after the current
+    # iteration (it never interrupts a phase); removing the file continues it. The path is
+    # relative to the runner's working directory unless it is absolute.
+    PAUSE_FILE="${PAUSE_FILE:-PAUSE_SCRIPT}"
+    PAUSE_CHECK_INTERVAL="${PAUSE_CHECK_INTERVAL:-30}"
+
+    # --- what a run records about itself ---------------------------------------
+    # SERVER_LOG_MARKS: write a marker for every phase into the database server's own log, so
+    #   server-side evidence (autovacuum, checkpoints) can be aligned with the run log.
+    # ARCHIVE_CONFIGURATION: at the end of a successful run, copy the resolved configuration,
+    #   the workload template and whatever the backend can archive of its server state into
+    #   $EXPERIMENT_DIR/config.
+    SERVER_LOG_MARKS="${SERVER_LOG_MARKS:-1}"
+    ARCHIVE_CONFIGURATION="${ARCHIVE_CONFIGURATION:-1}"
+
     # --- workload phases -------------------------------------------------------
     # Extend phase: grow the values, nothing else.
     extendproportion_extend="${EXTEND_PROPORTION_EXTEND:-1}"
@@ -249,6 +301,77 @@ config::derive_paths() {
 
     # Query plan log
     PLAN_LOG="$LOG_DIR/${EXPERIMENT_NAME}_query_plan.log"
+}
+
+# Mask anything that looks like a credential so a run's configuration archive can be shared
+# with the results. Property-style (`pass=…`, `password = …`) and shell-style (`DB_PWD=…`,
+# `export COUCHBASE_PASSWORD="…"`) both occur in the files a run reads, including inside JDBC
+# URLs (`jdbc:postgresql://h/db?user=u&password=p`).
+config::redact_file() {
+    local file="${1:?file required}"
+    sed -E \
+        -e 's/([?&](pass|password)[a-zA-Z_]*)=[^&[:space:]]*/\1=<REDACTED>/Ig' \
+        -e 's/^([[:space:]]*(export[[:space:]]+)?[A-Za-z_.]*([Pp][Aa][Ss][Ss]|[Pp]assword|[Pp][Ww][Dd]|[Ss]ecret|[Tt]oken)[A-Za-z_.]*)[[:space:]]*=[[:space:]]*.*/\1=<REDACTED>/' \
+        "$file"
+}
+
+# The resolved configuration of this run, as one text artefact for the run directory. Values
+# that carry credentials are never printed, only their presence; everything else is written in
+# full, because "which run was this?" is the question an archive has to answer months later.
+config::describe() {
+    printf '# YCSB experiment configuration\n'
+    printf '# generated: %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    printf '# execution: %s\n' "${EXECUTION_ID:-not started}"
+    printf '# host: %s\n' "$(hostname 2>/dev/null || printf unknown)"
+    printf '# harness: %s\n' "$(config::harness_version)"
+    printf '\n# --- identity ---\n'
+    printf 'backend=%s\n' "${ACTIVE_BACKEND:-?}"
+    printf 'mode=%s\n' "${EXPERIMENT_MODE:-mainline}"
+    printf 'experiment_name=%s\n' "${EXPERIMENT_NAME:-?}"
+    printf 'type=%s\nscale=%s\nextend_dist=%s\nworkload=%s\nrun=%s\n' \
+        "${TYPE:-?}" "${SCALE:-?}" "${EXTEND_DIST:-?}" "${WORKLOAD:-?}" "${RUN:-?}"
+    printf 'binding=%s\n' "${YCSB_BINDING:-?}"
+    printf '\n# --- run size and behaviour ---\n'
+    printf 'epochs=%s\nsteps_per_epoch=%s\ncomparison_interval=%s\n' \
+        "${NUM_EPOCHS:-?}" "${STEPS_PER_EPOCH:-?}" "${COMPARISON_INTERVAL:-?}"
+    printf 'resume_from_iteration=%s\nvacuum_enabled=%s\npause_maintenance=%s\n' \
+        "${RESUME_FROM_ITERATION:-0}" "${VACUUM_ENABLED:-?}" "${PAUSE_MAINTENANCE:-?}"
+    printf 'idle_wait_interval=%s\nidle_wait_timeout=%s\npause_file=%s\n' \
+        "${IDLE_WAIT_INTERVAL:-?}" "${IDLE_WAIT_TIMEOUT:-?}" "${PAUSE_FILE:-?}"
+    printf 'server_log_marks=%s\nos_stats_enabled=%s\ndb_stats_interval=%s\narchive_configuration=%s\n' \
+        "${SERVER_LOG_MARKS:-?}" "${OS_STATS_ENABLED:-?}" "${DB_STATS_INTERVAL:-?}" "${ARCHIVE_CONFIGURATION:-?}"
+    printf '\n# --- endpoint (credentials never written) ---\n'
+    printf 'endpoint=%s:%s\nusername=%s\n' "${DB_HOST:-?}" "${DB_PORT:-?}" "${DB_USERNAME:-?}"
+    printf 'password_set=%s\n' "$([[ -n "${DB_PWD:-}" ]] && printf yes || printf no)"
+    printf 'database=%s\nunchanged_database=%s\nbackup_database=%s\n' \
+        "${DB_NAME:-?}" "${UNCHANGED_DB_NAME:-?}" "${BACKUP_DB_NAME:-?}"
+    printf '\n# --- workload ---\n'
+    printf 'workload_template=%s\n' "${WORKLOAD_FILE:-?}"
+    printf 'workload_template_sha256=%s\n' "$(workload::hash "$WORKLOAD_FILE" 2>/dev/null || printf unavailable)"
+    printf 'fieldlengthoriginal=%s\nextend_operationcount=%s\n' \
+        "${fieldlengthoriginal:-?}" "${extendoperationcount:-?}"
+    printf '\n# --- paths ---\n'
+    printf 'experiment_dir=%s\nlog_file=%s\nresults_csv=%s\nworkload_dir=%s\n' \
+        "${EXPERIMENT_DIR:-?}" "${LOG_FILE:-?}" "${OUTPUT_FILE:-?}" "${WORKLOAD_DIR:-?}"
+    printf '\n# --- configuration files applied (in order, credentials masked) ---\n'
+    if (( ${#CONFIG_SOURCES[@]} )); then
+        printf '%s\n' "${CONFIG_SOURCES[@]}"
+    else
+        printf '<none>\n'
+    fi
+}
+
+# Which build of the harness produced a run: the git commit when the tree has one, and the
+# mtime of the entry point otherwise (a deployed bundle has no .git).
+config::harness_version() {
+    local dir="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+    local commit
+    commit="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null)" && {
+        printf '%s%s\n' "$commit" "$(git -C "$dir" status --porcelain --quiet 2>/dev/null || printf -- '-dirty')"
+        return 0
+    }
+    printf 'no git metadata; %s modified %s\n' "$(basename "${BASH_SOURCE[1]:-$dir}")" \
+        "$(date -u -r "$dir/experiment.sh" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf unknown)"
 }
 
 # Apply KEY=VALUE overrides coming from --var on the command line.

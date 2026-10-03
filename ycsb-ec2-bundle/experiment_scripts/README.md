@@ -89,11 +89,23 @@ cp conf/db.postgresql.env.example conf/db.postgresql_textarray.env   # endpoint 
   `VACUUM_ENABLED`, `COMPARISON_INTERVAL` (0 disables the comparison phases in
   mainline), `DB_NAME`/`UNCHANGED_DB_NAME`/`BACKUP_DB_NAME`, `EXPERIMENT_DIR`,
   `OS_STATS_ENABLED` (0 skips the per-second `.osstats`/`.diskstats` files).
+- How a run behaves between measurements:
+
+| Knob | Default | Meaning |
+| --- | --- | --- |
+| `PAUSE_MAINTENANCE` | `1` | Switch the database's background maintenance of the measured table off before the reference/clean-run phases and on again before extend, so no phase is timed while the server cleans up one table and not another. Backends without such a switch ignore it. `VACUUM_ENABLED=1` still runs an explicit `VACUUM ANALYZE`; the two are independent. |
+| `IDLE_WAIT_INTERVAL`, `IDLE_WAIT_TIMEOUT` | `30`, `7200` | How often, and for how long at most, a phase waits for the server to go quiet before it is measured. One pair for every wait: an autovacuum on a heavily extended table can run for over an hour, and a wait that gives up early charges that work to the phase. |
+| `PAUSE_FILE` | `PAUSE_SCRIPT` | `touch PAUSE_SCRIPT` holds the run at the next iteration boundary (never inside a phase); removing the file continues it. `PAUSE_CHECK_INTERVAL` is how often it looks. |
+| `SERVER_LOG_MARKS` | `1` | Write a marker for every phase into the database server's own log, so server-side evidence lines up with the run log without matching timestamps (PostgreSQL family; other backends have no such hook and write nothing). |
+| `ARCHIVE_CONFIGURATION` | `1` | At the end of a successful run, write `$EXPERIMENT_DIR/config`: resolved configuration (credentials masked), applied config files, workload template, plus the server's own configuration file and its slice of the server log (PostgreSQL family). |
+| `RESUME_FROM_ITERATION` | `0` | Same as `--resume-from`, below. |
 - The names the last pre-refactor runners used are accepted as synonyms of the canonical
   ones, so an old invocation line still runs the same experiment: `EPOCHS` → `NUM_EPOCHS`,
   `RUNS_PER_EPOCH` → `STEPS_PER_EPOCH`, `EXTENDOPERATIONCOUNT` → `EXTEND_OPERATIONCOUNT`,
   `DIST` → `EXTEND_DIST`, `WORK` → `WORKLOAD`. The canonical name always wins, and using a
-  synonym is reported as `[config] EPOCHS=3 is a synonym for NUM_EPOCHS=3`.
+  synonym is reported as `[config] EPOCHS=3 is a synonym for NUM_EPOCHS=3`. The old
+  `RESUME_FROM_EPOCH` name means `RESUME_FROM_ITERATION` (it always counted global
+  iterations), and its `-1` still means "do not resume".
 - Workload files are **read-only templates** (`../workloads/`). Every phase gets an
   immutable, provenance-tagged copy under `$EXPERIMENT_DIR/workloads/`; a run never
   writes to `workloads/`.
@@ -109,6 +121,7 @@ cp conf/db.postgresql.env.example conf/db.postgresql_textarray.env   # endpoint 
 --mode NAME           mainline|baseline
 --workload FILE       read-only workload template
 --experiment-dir DIR  root for logs, data and generated workloads
+--resume-from N       continue an interrupted run at global iteration N (see "Pause, Resume")
 --dry-run             print resolved configuration and exit
 --check               run preflight and exit
 --list-backends       list backends and exit
@@ -215,12 +228,21 @@ head -2 "$EXP/data/workload_data/"*.csv # one row per measured phase, standard c
 ls "$EXP/data/value_size_data/"         # value sizes before/after extend (mainline: 2 files)
 ls "$EXP/logs/histogram.txt"
 ls "$EXP/workloads/"                    # one generated workload per phase
+grep -c 'MAINTENANCE mode=' "$EXP/logs/"*_results.log   # maintenance switched off/on, never left off
+grep -c 'ARCHIVE server' "$EXP/logs/"*_results.log      # what the run could archive of the server
+ls "$EXP/config/"                       # resolved configuration (+ server state where readable)
 git -C .. status --porcelain workloads  # empty: templates were never touched
 ```
 
 The results CSV keeps the authoritative column schema (base columns + the backend's
 statistics columns), so `../analysis_scripts/` parse every backend's output. A row whose
 `Return=` is non-zero, or a missing completion marker, means the run is not evidence.
+
+PostgreSQL runs carry eight statistics columns more than before master's autovacuum runner
+was merged in: `n_tup_ins`, `n_tup_del` and `autoanalyze_count` for both the measured table
+and its TOAST table, and `usertable_relpages`/`usertable_size_in_bytes` with
+`toast_relpages`/`toast_size_in_bytes`. They are appended in the same relative order, so
+older CSVs still parse by name; nothing that existed before was renamed or removed.
 
 ## Output Layout
 
@@ -240,26 +262,84 @@ Everything goes under one experiment directory
 │   ├── <db>_<name>_<phase>.diskstats    # which devices those rates cover
 │   ├── restore_logs/                    # dump/restore of the comparison database, per iteration
 │   ├── vacuum_logs/                     # raw VACUUM (ANALYZE, VERBOSE) output, per phase
-│   └── javagc/                          # YCSB JVM GC logs
+│   └── javagc/javagc_run<N>_<phase>_epoch<K>.log
 ├── data/
 │   ├── workload_data/<name>.csv         # the results CSV (analysis input)
 │   ├── key_sizes_<name>.csv
 │   └── value_size_data/value_sizes_*.csv
-└── workloads/                           # generated, immutable, provenance-tagged
+├── workloads/                           # generated, immutable, provenance-tagged
+└── config/                              # what this run was configured with (see below)
+    ├── resolved_config.txt              # every knob as the run used it, credentials masked
+    ├── input_<file>                     # workload template and applied --config files
+    ├── postgresql.conf                  # server configuration   (PostgreSQL family)
+    ├── server_settings.txt              # settings actually in force (PostgreSQL family)
+    └── server_log_<file>                # the server-log lines between this run's markers
 ```
 
 `EXPERIMENT_NAME` = `<type>_<scale>_extend-<dist>_<workload>_run<N>` plus a `_baseline`
 suffix in baseline mode.
 
+## Pause, Resume And Background Maintenance
+
+**Pause between iterations.** `touch PAUSE_SCRIPT` in the runner's directory (or
+`--var PAUSE_FILE=/path/to/file`) stops the experiment once the current iteration ends —
+never in the middle of a phase — and logs `PAUSE experiment paused`; remove the file to
+continue. The wait is logged with its duration, so a paused run cannot be mistaken for a
+slow one.
+
+**Resume after an interruption.** `--resume-from N` continues the *same* experiment
+directory instead of starting over:
+
+```bash
+# interrupted at iteration 37 of a 10x10 run; the databases still hold their state:
+./experiment.sh postgresql_textarray --config conf/scale.heavy.env \
+    --type postgresql_textarrays_autovacuum --scale heavy --run-id 3 \
+    --epochs 10 --steps 10 --resume-from 37
+```
+
+What that changes, and why it is safe:
+
+* the `load` and `reference-load` phases do not run — the databases already contain what
+  they loaded, and each is verified instead of recreated (`ERROR resume: database … has no
+  table public.usertable to continue from` if it does not);
+* iterations below `N` are skipped, everything from `N` runs normally;
+* the run log, results CSV, value-size CSVs and histogram are **appended to**, never
+  rewritten; each attempt is still identifiable by its own `EXECUTION_ID` line.
+
+Resuming therefore requires the interrupted run's databases. If they were dropped, or if
+the point of interruption is unknown, start a new `--run-id` instead — that is what keeps
+evidence unambiguous.
+
+**Background maintenance.** Between measurements the runner asks the database to stop and
+start its own maintenance of the measured table (`PAUSE_MAINTENANCE`): off before the
+reference and clean-run phases, on again before the next extend, and always restored at
+the end so a finished run never leaves autovacuum disabled. Every idle wait also reports
+what ran during it — `MAINTENANCE idle window … autovacuum_count=3->4 dead_tuples=…` —
+which is what explains an unexpectedly slow phase. Backends without a per-table switch
+(`supports_maintenance_mode=0`) do nothing here and say nothing.
+
+**Server-side markers.** With `SERVER_LOG_MARKS=1` every phase boundary is also written
+into the server's own log (`EXPERIMENT RUN=<run> EXEC=<execution-id> EPOCH=<e>
+ITER=<i> PHASE=<phase>`), and the archived slice of that log at
+`config/server_log_*` is exactly the window between this run's first and last marker —
+checkpoints, autovacuum activity and errors, in the same order as the phases they explain.
+
 ## Stop Or Restart Cleanly
 
 `Ctrl-C` in tmux: the runner's trap stops the watcher process group and finalises the
-log. Before reusing anything, confirm no leftovers:
+log. To stop a run without killing it, `touch PAUSE_SCRIPT` and wait for the iteration
+boundary. Before reusing anything, confirm no leftovers:
 
 ```bash
 pgrep -a -f 'experiment.sh|watcher.sh|ycsb|java' || true
 mv <EXPERIMENT_DIR>{,_cancelled_$(date -u +%Y%m%dT%H%M%SZ)}   # archive the partial run
 ```
+
+If the interruption was accidental and the databases were not touched, `--resume-from
+<iteration>` continues that run instead of discarding it — see "Pause, Resume And
+Background Maintenance". Check the interrupted log for the last `END iteration` line to
+know where to resume; resuming from an iteration that already completed duplicates its
+rows.
 
 ## Tests And Preflight
 
@@ -291,3 +371,25 @@ it; the jsonb schema it benchmarked is `./experiment.sh postgresql_json`.
 An old run can still be reproduced from the annotated tag `pre-refactor-scripts`
 (`git worktree add ../pre-refactor pre-refactor-scripts`); existing full-visibility
 evidence keeps that provenance. Do not resurrect or adapt the scripts in this tree.
+
+**Merging master after step 8c.** `master` still carries
+`experiment_postgresql_array-text-autovacuum.sh`, so a merge reports it as modified here and
+deleted there. Its changes are ported into the framework rather than brought back as a
+script — that script is what this harness exists to replace, and its features apply to every
+backend, not only to the text-array schema:
+
+| What master changed there | Where it lives now |
+| --- | --- |
+| extra statistics columns (inserts/deletes, `autoanalyze_count`, relation sizes) | `lib/backends/_postgresql_common.sh` → all four PostgreSQL backends |
+| phase markers in the server log (`experiment_log()`) | `backend::mark_run`, called from `lib/lifecycle.sh` for every phase of every backend |
+| autovacuum switched off/on between phases | `backend::maintenance_mode` + `PAUSE_MAINTENANCE` (now also restored at the end of a run) |
+| longer idle waits, and reporting what maintenance ran during them | `IDLE_WAIT_INTERVAL`/`IDLE_WAIT_TIMEOUT`, `postgresql::report_maintenance` |
+| resuming an interrupted run (`RESUME_FROM_EPOCH`) | `--resume-from` / `RESUME_FROM_ITERATION`, in both engines; the old name is accepted as a synonym |
+| archiving configuration and server logs at the end | `experiment::archive_configuration` + `backend::archive_server_state` |
+| pausing between iterations (`PAUSE_SCRIPT`) | `pause_if_requested` + `PAUSE_FILE` |
+| `javagc_run<N>_<phase>_epoch<K>.log` naming | `run_with_metrics`, unchanged for every backend |
+
+Two of its changes were deliberately **not** ported: the `log()` allow-list (this branch logs
+everything — see the comment in `lib/common.sh`) and its `[epoch=<iteration> phase=…]` prefix,
+since `epoch`+`step` in this harness's log lines is strictly more precise than a global
+iteration number.

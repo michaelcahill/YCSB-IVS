@@ -571,6 +571,7 @@ has_dump_restore=1
 supports_idle_wait=0
 requires_index_wait=0
 supports_vacuum=0
+supports_maintenance_mode=0
 supports_query_plan=1
 host_os_user=neo4j
 INFO

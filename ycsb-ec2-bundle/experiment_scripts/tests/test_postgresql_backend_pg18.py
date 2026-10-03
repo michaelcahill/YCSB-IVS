@@ -46,10 +46,21 @@ elif tool == "psql":
             sys.exit(3)
         sys.exit(0)
     if "-c" not in args:
+        # A statement on stdin: that is how a phase marker is written, because psql only
+        # interpolates variables in a script and never in -c.
+        statement = sys.stdin.read()
+        with open(os.environ["MOCK_TRACE"], "a") as trace:
+            trace.write(json.dumps([tool + ":stdin", [statement.strip()]]) + "\n")
+        if mode == "marker_failure" and "experiment_log" in statement:
+            sys.exit(1)
         sys.exit(0)
     sql = args[args.index("-c") + 1]
     if "server_version_num" in sql:
         print("170000" if mode == "old_server" else "180001")
+    elif "is_superuser" in sql:
+        # Asked by the phase-marker installer: only a superuser may grant SET on a logging
+        # parameter, and the mock must be able to stand in for a role that is not one.
+        print("off" if mode == "no_superuser" else "on")
     elif "pg_catalog.pg_roles" in sql:
         print("f" if mode == "no_createdb" else "t")
     elif "pg_has_role" in sql:
@@ -57,10 +68,43 @@ elif tool == "psql":
             print("f")
     elif "track_counts" in sql:
         print("off" if mode == "no_track_counts" else "on")
-    elif "pg_relation_size" in sql or "relfilenode" in sql:
-        # Relation size sampling: one small heap row plus its index.
-        print("usertable|table|8192|8192 bytes")
-        print("usertable_pkey|index|16384|16 kB")
+    elif "CREATE OR REPLACE FUNCTION" in sql or "GRANT SET ON PARAMETER" in sql:
+        if mode == "marker_failure":
+            sys.exit(1)
+    elif "ALTER TABLE" in sql:
+        # Background maintenance on/off for the measured table.
+        if mode == "maintenance_failure":
+            sys.exit(1)
+    elif "pg_stat_user_tables" in sql:
+        # What maintenance did during an idle wait: autovacuum/autoanalyze/vacuum counts,
+        # dead tuples, last autovacuum.
+        print("1|0|0|42|none")
+    elif "reltuples" in sql:
+        # Resume readiness: the measured table exists (or does not).
+        print("f|-1" if mode == "resume_missing" else "t|1000")
+    elif "current_setting('config_file'" in sql:
+        print("/var/lib/pgsql/data/postgresql.conf")
+    elif "current_setting('log_directory'" in sql:
+        print("log")
+    elif "pg_ls_logdir" in sql:
+        if mode == "no_server_files":
+            sys.exit(1)
+        print("postgresql-Sat.log|2048")
+    elif "pg_read_file" in sql:
+        if mode == "no_server_files":
+            sys.exit(1)
+        if "marked" in sql:
+            # The window of server log between this run's markers.
+            print("LOG:  marker line\nLOG:  second line")
+        else:
+            print("# mock postgresql.conf")
+    elif "pg_settings" in sql:
+        print("autovacuum|on|default")
+    elif "relfilenode" in sql:
+        # Relation size sampling: one small heap row plus its index. Columns are
+        # name, type, relpages, raw size, pretty size (relsize_metric_names).
+        print("usertable|table|40|327680|320 kB")
+        print("usertable_pkey|index|2|16384|16 kB")
     elif "pg_stat_checkpointer" in sql:
         if mode == "metrics_failure":
             print("mock metrics SQL error", file=sys.stderr)
@@ -258,6 +302,74 @@ class PostgreSQLBackendTests(unittest.TestCase):
                         self.assertIn("mock restore SQL error",
                                       (self.scripts / "restore.log").read_text())
 
+    # --- phase markers, maintenance, resume checks and the server archive -------
+
+    def test_phase_marker_is_installed_once_and_written_per_phase(self):
+        self.trace.write_text("")
+        body = ("backend::mark_run ycsb 'EXPERIMENT RUN=1 PHASE=load'\n"
+                "backend::mark_run ycsb 'EXPERIMENT RUN=1 PHASE=run'\n"
+                "backend::mark_run ycsb 'EXPERIMENT RUN=1 PHASE=END'\n"
+                "printf 'MARKED\\n'\n")
+        r = self.run_bash(self.harness(body))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = [a for t, a in self.calls() if t == "psql"] + \
+                [a for t, a in self.calls() if t == "psql:stdin"]
+        created = [a for a in calls if any("CREATE OR REPLACE FUNCTION experiment_log" in x for x in a)]
+        written = [a for a in calls if any("experiment_log(:'mark')" in x for x in a)]
+        self.assertEqual(len(created), 1, "the marker function is installed once per database")
+        self.assertEqual(len(written), 3, "one marker per phase")
+
+    def test_a_marker_that_cannot_be_written_never_loses_a_phase(self):
+        # A role that may not create the function, or whose server rejects the call, must still
+        # run the phase: markers are diagnostics.
+        body = ("backend::mark_run ycsb 'EXPERIMENT RUN=1 PHASE=run'\n"
+                "printf 'PHASE_RAN\\n'\n")
+        r = self.run_bash(self.harness(body), "marker_failure")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("PHASE_RAN", r.stdout)
+        self.assertIn("no server-side phase markers", r.stderr)
+
+    def test_maintenance_mode_switches_the_measured_table(self):
+        self.trace.write_text("")
+        body = ("backend::maintenance_mode off ycsb\n"
+                "backend::maintenance_mode on ycsb\n")
+        r = self.run_bash(self.harness(body))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sqls = [x for t, a in self.calls() if t == "psql" for x in a if "ALTER TABLE" in x]
+        self.assertEqual(len(sqls), 2, sqls)
+        self.assertIn("SET (autovacuum_enabled = false)", sqls[0])
+        self.assertIn("RESET (autovacuum_enabled)", sqls[1])
+
+    def test_resume_requires_the_measured_table(self):
+        for mode, expected in (("ok", 0), ("resume_missing", 1)):
+            with self.subTest(mode=mode):
+                r = self.run_bash(self.harness(
+                    "backend::verify_resume_ready ycsb\nprintf 'READY\\n'\n"), mode)
+                self.assertEqual((r.returncode == 0), expected == 0, r.stderr)
+                self.assertEqual("READY" in r.stdout, expected == 0)
+                if expected:
+                    self.assertIn("no table public.usertable to continue from", r.stderr)
+
+    def test_archive_server_state_writes_what_the_role_may_read(self):
+        out = self.root / "archive"
+        body = f'mkdir -p {out}\nbackend::archive_server_state {out}\n'
+        r = self.run_bash(self.harness(body))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ARCHIVE server configuration", r.stderr)
+        # The mock stands in for a superuser: the configuration file, the settings that were
+        # in force and the run's slice of the server log are all readable through SQL.
+        self.assertEqual((out / "postgresql.conf").read_text().strip(), "# mock postgresql.conf")
+        self.assertIn("marker line", (out / "server_log_postgresql-Sat.log").read_text())
+
+        # A role that may not read the server's files archives nothing and fails nothing.
+        empty = self.root / "archive2"
+        r = self.run_bash(self.harness(f'mkdir -p {empty}\nbackend::archive_server_state {empty}\n'),
+                          "no_server_files")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("ARCHIVE server configuration /var", r.stderr)
+        self.assertIn("not readable", r.stderr)
+        self.assertFalse(list(empty.glob("postgresql.conf")))
+
     # --- results CSV ---------------------------------------------------------
 
     def test_csv_headers_and_values_stay_aligned(self):
@@ -287,6 +399,17 @@ class PostgreSQLBackendTests(unittest.TestCase):
         with output.open() as stream:
             rows = list(csv.reader(stream))
         self.assertEqual(len(rows), 3)
+
+        # The columns master's array-text-autovacuum runner measured, now emitted by every
+        # PostgreSQL backend: per-table insert/delete counts and autoanalyze_count for both the
+        # measured table and its TOAST table, plus the physical size of each.
+        header = rows[0]
+        for column in ("usertable_n_tup_ins", "usertable_n_tup_del",
+                       "usertable_autoanalyze_count",
+                       "toast_n_tup_ins", "toast_n_tup_del", "toast_autoanalyze_count",
+                       "usertable_relpages", "usertable_size_in_bytes",
+                       "toast_relpages", "toast_size_in_bytes"):
+            self.assertIn(column, header)
         self.assertEqual(len(rows[0]), len(set(rows[0])), "duplicate CSV column names")
         stats_start = rows[0].index("blks_read")
         stats_end = rows[0].index("Readprop")

@@ -82,6 +82,9 @@
 [<TIMESTAMP>] [epoch=0 run=0 phase=reference-load] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke_unch status=0 duration=<N>s
 [<TIMESTAMP>] [epoch=0 run=0 phase=reference-load] Reference-load verification - TotalSize:<N> ExpectedFieldLength:100
 [<TIMESTAMP>] [epoch=1 run=1 phase=reference-load] === Generating the extend workload ===
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] MAINTENANCE mode=on database=ycsb_smoke background maintenance of the measured table
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] START PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=extend] END PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke status=0 duration=<N>s
 [<TIMESTAMP>] [epoch=1 run=1 phase=extend] === Executing the extend phase with extendproportion=1 and other proportions=0 ===
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke
 [<TIMESTAMP>] [epoch=1 run=1 phase=extend] START YCSB extend
@@ -156,6 +159,10 @@
 [<TIMESTAMP>] [epoch=1 run=1 phase=run] START PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke
 [<TIMESTAMP>] [epoch=1 run=1 phase=run] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke status=0 duration=<N>s
 [<TIMESTAMP>] [epoch=1 run=1 phase=run] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] MAINTENANCE idle window <STATS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] MAINTENANCE mode=off database=ycsb_smoke background maintenance of the measured table
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] START PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=run] END PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke status=0 duration=<N>s
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke_unch
 [<TIMESTAMP>] [epoch=1 run=1 phase=reference] START YCSB reference
 [<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/experiment/workloads/reference-iter01.workload -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke_unch -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthhistogram=<WORKDIR>/experiment/logs/histogram.txt
@@ -197,6 +204,11 @@
 [<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] START PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke
 [<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke status=0 duration=<N>s
 [<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] MAINTENANCE idle window <STATS>
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] START PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke_bak
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] END PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke_bak status=0 duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] START PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] END PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke status=0 duration=<N>s
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke_bak
 [<TIMESTAMP>] [epoch=1 run=1 phase=clean-run] START YCSB clean-run
 [<TIMESTAMP>] Command line: -t -db site.ycsb.db.JdbcDBClient -s -P <WORKDIR>/experiment/workloads/clean-run-iter01.workload -P ../jdbc-binding/conf/postgres.properties -p db.url=jdbc:postgresql://127.0.0.1:<N>/ycsb_smoke_bak -p db.user=ycsb -p db.passwd=<REDACTED> -p fieldlengthhistogram=<WORKDIR>/experiment/logs/histogram.txt
@@ -240,10 +252,11 @@
 [<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] START PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke_bak
 [<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke_bak status=0 duration=<N>s
 [<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] Avg-run verification - Epoch:1 Step:1 Iteration:1 TotalSize:<N> ExpectedFieldLength:115
-[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] START WAIT FOR IDLE POSTGRES database=ycsb_smoke
-[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] START PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke
-[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke status=0 duration=<N>s
-[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] END WAIT FOR IDLE POSTGRES database=ycsb_smoke duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] START WAIT FOR IDLE POSTGRES database=ycsb_smoke_bak
+[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] START PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke_bak
+[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] END PostgreSQL operation tool=psql action=SELECT database=ycsb_smoke_bak status=0 duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] END WAIT FOR IDLE POSTGRES database=ycsb_smoke_bak duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] MAINTENANCE idle window <STATS>
 [<TIMESTAMP>] [epoch=1 run=1 phase=comparison-load] Preparing run workload: read=1 update=0 extend=0
 [<TIMESTAMP>] Starting metrics collection for ycsb_smoke_bak
 [<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] START YCSB avg-run
@@ -268,6 +281,13 @@
 [<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] START CSV write database statistics phase=avg-run
 [<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END CSV write output=<WORKDIR>/experiment/data/workload_data/smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1.csv
 [<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END iteration
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] MAINTENANCE mode=on database=ycsb_smoke background maintenance of the measured table
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] START PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END PostgreSQL operation tool=psql action=ALTER database=ycsb_smoke status=0 duration=<N>s
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] START experiment configuration archive directory=<WORKDIR>/experiment/config
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] ARCHIVE server configuration <FILE>
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] ARCHIVE server log <SLICE>
+[<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END experiment configuration archive directory=<WORKDIR>/experiment/config files=5
 [<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] === All steps completed. Results are logged in <WORKDIR>/experiment/logs/ycsb_smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1_results.log ===
 [<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] END experiment status=0 duration=<N>s
 [<TIMESTAMP>] [epoch=1 run=1 phase=avg-run] Download this log from EC2: <WORKDIR>/experiment/logs/ycsb_smoke_textarray_heavy_extend-zipfian_readonly-uniform_run1_results.log

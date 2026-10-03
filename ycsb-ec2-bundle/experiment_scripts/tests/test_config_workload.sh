@@ -177,6 +177,125 @@ else
     ok
 fi
 
+# --- run behaviour knobs ------------------------------------------------------
+# Every knob a run can be told to change has a default, so that a run without any configuration
+# still says what it did: the archive in $EXPERIMENT_DIR/config is written by default, and the
+# idle waits have one interval/timeout pair for every phase of every backend.
+behaviour_defaults() {
+    (
+        set -euo pipefail
+        backend::default_config() { :; }
+        registry::info() { printf '\n'; }
+        unset RESUME_FROM_ITERATION RESUME_FROM_EPOCH PAUSE_MAINTENANCE IDLE_WAIT_INTERVAL \
+              IDLE_WAIT_TIMEOUT PAUSE_FILE PAUSE_CHECK_INTERVAL SERVER_LOG_MARKS ARCHIVE_CONFIGURATION
+        config::init_defaults || exit 1
+        printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$RESUME_FROM_ITERATION" "$PAUSE_MAINTENANCE" \
+            "$IDLE_WAIT_INTERVAL" "$IDLE_WAIT_TIMEOUT" "$PAUSE_FILE" "$PAUSE_CHECK_INTERVAL" \
+            "$SERVER_LOG_MARKS" "$ARCHIVE_CONFIGURATION"
+    )
+}
+eq "run behaviour defaults" "$(behaviour_defaults)" "0|1|30|7200|PAUSE_SCRIPT|30|1|1"
+
+# Resuming is the one knob that can silently destroy or waste work, so it is validated where it
+# is read: a run cannot resume past its own last iteration, and master's -1 still means "no
+# resume" rather than running one iteration fewer.
+# resume_value EPOCHS STEPS ASSIGNMENT... -> "<RESUME_FROM_ITERATION>|<messages>"; the
+# assignments are applied after the names are cleared, so a case can offer both spellings.
+resume_value() {
+    local epochs="${1:-2}" steps="${2:-5}" msgfile="$TMP/resume_messages" assignment result
+    shift 2 2>/dev/null || true
+    # The messages go to a file rather than through a command substitution: that would run the
+    # configuration layer in a subshell and lose the variables it computed.
+    result="$(
+        (
+            set -euo pipefail
+            backend::default_config() { :; }
+            registry::info() { printf '\n'; }
+            unset RESUME_FROM_ITERATION RESUME_FROM_EPOCH
+            NUM_EPOCHS="$epochs" STEPS_PER_EPOCH="$steps"
+            for assignment in "$@"; do
+                # config::init_defaults reads the environment layer, so these are exported.
+                # shellcheck disable=SC2163  # the assignment string itself is what we export
+                export "$assignment"
+            done
+            config::init_defaults 2>"$msgfile" || exit 1
+            printf '%s' "$RESUME_FROM_ITERATION"
+        )
+    )"; local rc=$?
+    printf '%s|%s\n' "$result" "$(cat "$msgfile" 2>/dev/null)"
+    return "$rc"
+}
+eq "no resume by default" "$(resume_value 2 5 | cut -d'|' -f1)" "0"
+eq "master's RESUME_FROM_EPOCH=-1 means no resume" \
+    "$(resume_value 2 5 RESUME_FROM_EPOCH=-1 | cut -d'|' -f1)" "0"
+eq "RESUME_FROM_EPOCH is a synonym of RESUME_FROM_ITERATION" \
+    "$(resume_value 2 5 RESUME_FROM_EPOCH=7 | cut -d'|' -f1)" "7"
+has "using the synonym is reported" "$(resume_value 2 5 RESUME_FROM_EPOCH=7)" \
+    "RESUME_FROM_EPOCH=7 is a synonym for RESUME_FROM_ITERATION=7"
+eq "the canonical name wins over the synonym" \
+    "$(resume_value 2 5 RESUME_FROM_ITERATION=4 RESUME_FROM_EPOCH=7 | cut -d'|' -f1)" "4"
+if resume_value 1 2 RESUME_FROM_ITERATION=9 >/dev/null 2>&1; then
+    bad "a resume past the last iteration must be rejected"
+else
+    ok
+fi
+if resume_value 2 5 RESUME_FROM_ITERATION=second >/dev/null 2>&1; then
+    bad "a non-numeric resume iteration must be rejected"
+else
+    ok
+fi
+# The rejection has to say what was wrong, not just that something was.
+has "resume past the last iteration explains itself" \
+    "$(resume_value 1 2 RESUME_FROM_ITERATION=9)" "would execute nothing"
+
+# --- configuration archive helpers --------------------------------------------
+
+# Credentials appear in three shapes in the files a run reads: shell assignments, property
+# lines and JDBC URLs. All three are masked, because the archive is published with the results.
+cat > "$TMP/secrets.env" <<'EOF'
+DB_PWD=topsecret
+export COUCHBASE_PASSWORD="another"
+db.passwd=thirdsecret
+jdbc.url=jdbc:postgresql://h:5432/ycsb?user=u&password=fourth
+PLAIN_VALUE=visible
+EOF
+redacted="$(config::redact_file "$TMP/secrets.env")"
+for secret in topsecret another thirdsecret fourth; do
+    if [[ "$redacted" == *"$secret"* ]]; then
+        bad "redaction leaked $secret: $redacted"
+    else
+        ok
+    fi
+done
+has "redaction keeps ordinary values" "$redacted" "PLAIN_VALUE=visible"
+has "redaction marks what it hid" "$redacted" "jdbc.url=jdbc:postgresql://h:5432/ycsb?user=u&password=<REDACTED>"
+
+# The archive's own summary must name every knob a run can differ in, and never a password.
+described() {
+    (
+        set -euo pipefail
+        backend::default_config() { :; }
+        registry::info() { printf '\n'; }
+        TYPE=t SCALE=light RUN=1 EXTEND_DIST=d WORKLOAD=w DB_PWD=topsecret DB_USERNAME=bob
+        NUM_EPOCHS=2 STEPS_PER_EPOCH=3 EXPERIMENT_DIR=/tmp/e fieldlengthoriginal=100
+        config::init_defaults || exit 1
+        config::derive_paths || exit 1
+        config::describe
+    )
+}
+description="$(described)"
+for knob in resume_from_iteration pause_maintenance idle_wait_interval idle_wait_timeout \
+            pause_file server_log_marks archive_configuration comparison_interval epochs; do
+    has "the configuration archive records $knob" "$description" "$knob="
+done
+has "the configuration archive names the endpoint" "$description" "username=bob"
+if [[ "$description" == *topsecret* ]]; then
+    bad "the configuration archive must never contain a password"
+else
+    ok
+fi
+has "the configuration archive says whether one was set" "$description" "password_set=yes"
+
 # --- workload generation ------------------------------------------------------
 
 sandbox "$TMP/wl" || exit 1

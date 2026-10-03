@@ -762,6 +762,7 @@ has_dump_restore=1
 supports_idle_wait=1
 requires_index_wait=1
 supports_vacuum=0
+supports_maintenance_mode=0
 supports_query_plan=1
 host_os_user=couchbase
 runtime_watcher_dialect=

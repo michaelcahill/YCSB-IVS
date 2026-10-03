@@ -87,6 +87,30 @@ registry::load() {
     # than a connection need it (couchbase2: host, adhoc/kv/boost, insertion retries).
     declare -F backend::extra_binding_params >/dev/null ||
         eval 'backend::extra_binding_params() { :; }'
+    # A marker written into the *server's own* log at every phase boundary, so that server-side
+    # evidence can be aligned with the run log. Databases whose log a benchmark role cannot
+    # write to simply have no markers (PostgreSQL raises a log message through a function).
+    declare -F backend::mark_run >/dev/null || eval 'backend::mark_run() { :; }'
+    # Turn the server's background maintenance for one database off/on around the phases that
+    # must not be disturbed by it. Backends without such a switch (or without a per-database
+    # one) keep the no-op, and the runner says so once instead of pretending.
+    declare -F backend::maintenance_mode >/dev/null || eval 'backend::maintenance_mode() { :; }'
+    # Extra artefacts of the server itself for the run's configuration archive: its config file
+    # and the slice of its own log that belongs to this run. Anything a role may not read is
+    # reported and skipped — archiving must never fail a finished run.
+    declare -F backend::archive_server_state >/dev/null ||
+        eval 'backend::archive_server_state() {
+            log "ARCHIVE server state: this backend keeps no server-side configuration to archive"
+            return 0
+        }'
+    # Can a resumed run use this database as it is? Called instead of backend::init_db when
+    # resuming; the default says "cannot check" rather than "yes", because a resume that finds
+    # an empty table silently measures nothing.
+    declare -F backend::verify_resume_ready >/dev/null ||
+        eval 'backend::verify_resume_ready() {
+            log "WARNING resume: ${ACTIVE_BACKEND:-?} cannot verify that database $1 still holds the state to resume from"
+            return 0
+        }'
 }
 
 # registry::info KEY -> value from the active backend's metadata.

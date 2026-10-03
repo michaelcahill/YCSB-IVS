@@ -20,7 +20,14 @@ start_logging() {
 
     mkdir -p "$(dirname "$LOG_FILE")"
     LOG_FILE="$(cd "$(dirname "$LOG_FILE")" && pwd)/$(basename "$LOG_FILE")"
-    : > "$LOG_FILE"
+    # A resumed run continues the log of the attempt it resumes; a fresh run starts one. The
+    # START line below carries EXECUTION_ID, so an appended log still says which attempt wrote
+    # each of its lines.
+    if declare -F experiment::resume_active >/dev/null && experiment::resume_active; then
+        touch "$LOG_FILE"
+    else
+        : > "$LOG_FILE"
+    fi
 
     LOGGER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ycsb-logger.XXXXXX")
     if ! mkfifo "$LOGGER_DIR/stream"; then

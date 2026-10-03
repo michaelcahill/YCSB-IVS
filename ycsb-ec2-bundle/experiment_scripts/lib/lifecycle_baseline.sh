@@ -31,17 +31,22 @@ run_experiment_baseline() {
 
     experiment_bootstrap false "$DB_NAME"
 
-    run_load_phase
+    # A resume continues from the database an earlier attempt left behind, so it loads nothing.
+    if ! experiment::resume_active; then
+        run_load_phase
+    fi
 
     for epoch in $(seq 1 "$NUM_EPOCHS"); do
         for step in $(seq 1 "$STEPS_PER_EPOCH"); do
 
             iteration=$((STEPS_PER_EPOCH * ($epoch - 1) + $step))
+            (( iteration >= ${RESUME_FROM_ITERATION:-0} )) || continue
 
             run_extend_phase
             vacuum_if_enabled
             run_measured_phase
 
+            pause_if_requested
             log "END iteration"
         done
     done

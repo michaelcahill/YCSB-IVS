@@ -151,6 +151,11 @@ normalize_log() {
         -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}[:.][0-9]+/<DATETIME>/g' \
         -e 's/pg_toast_[0-9]+/pg_toast_<OID>/g' \
         -e 's/DB statistics .*/DB statistics <METRICS>/' \
+        -e 's/MAINTENANCE idle window .*/MAINTENANCE idle window <STATS>/' \
+        -e 's/ARCHIVE server configuration skipped:.*/ARCHIVE server configuration skipped/' \
+        -e 's/ARCHIVE server configuration \/.*/ARCHIVE server configuration <FILE>/' \
+        -e 's/ARCHIVE server log skipped .*/ARCHIVE server log skipped/' \
+        -e 's/ARCHIVE server log [^ ]+ .*/ARCHIVE server log <SLICE>/' \
         -e 's/\b(duration|statistics|relsizes|columns)=[0-9]+/\1=<N>/g' \
         -e 's/[0-9]{4,}/<N>/g' \
         -e "s#$WORKDIR#<WORKDIR>#g"
@@ -224,6 +229,41 @@ for f in $(find "$EXPERIMENT_DIR/data/value_size_data" -name '*.csv' | sort); do
     # Row counts and headers only: the per-key sizes depend on random choices.
     { head -1 "$f"; echo "rows=$(( $(wc -l < "$f") - 1 ))"; } > "$OUT/$base.shape.txt"
 done
+
+# --- the run recorded its own configuration ---------------------------------
+# A run has to be re-runnable months later, so it archives what it was configured with. The
+# archive is checked rather than compared as a golden because it names this host and this
+# directory; what must never appear in it is the password.
+echo "[smoke] checking the configuration archive"
+if [[ ! -s "$EXPERIMENT_DIR/config/resolved_config.txt" ]]; then
+    echo "[smoke] FAILED: no resolved configuration archived under $EXPERIMENT_DIR/config" >&2
+    exit 1
+fi
+for knob in backend= resume_from_iteration= pause_maintenance= idle_wait_timeout= \
+            server_log_marks= archive_configuration=; do
+    grep -q "^${knob}" "$EXPERIMENT_DIR/config/resolved_config.txt" || {
+        echo "[smoke] FAILED: archived configuration has no $knob" >&2; exit 1; }
+done
+if grep -rqF "$DB_PWD" "$EXPERIMENT_DIR/config/" 2>/dev/null; then
+    echo "[smoke] FAILED: the configuration archive contains the benchmark password" >&2
+    exit 1
+fi
+echo "[smoke] configuration archived without credentials"
+
+# Background maintenance is switched around the phases (master's autovacuum control), and the
+# phase boundaries are written into the server's own log. Both are PostgreSQL features, and this
+# smoke run is a PostgreSQL run.
+grep -q 'MAINTENANCE mode=off' "$LOG_FILE" || {
+    echo "[smoke] FAILED: the run never paused background maintenance" >&2; exit 1; }
+grep -q 'MAINTENANCE mode=on' "$LOG_FILE" || {
+    echo "[smoke] FAILED: background maintenance was left switched off" >&2; exit 1; }
+if compgen -G "$EXPERIMENT_DIR/config/server_log_*" >/dev/null; then
+    grep -q 'EXPERIMENT RUN=' "$EXPERIMENT_DIR"/config/server_log_* || {
+        echo "[smoke] FAILED: archived server log holds no phase markers" >&2; exit 1; }
+    echo "[smoke] server log slice archived with this run's phase markers"
+else
+    echo "[smoke] server log not archived (role may not read the server's files) - skipped"
+fi
 
 HISTOGRAM="$(find "$EXPERIMENT_DIR" -name 'histogram.txt' | head -1)"
 if [[ -n "$HISTOGRAM" ]]; then

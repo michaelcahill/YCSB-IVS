@@ -72,6 +72,10 @@ Options:
                       artefact names gain a _baseline suffix.
   --workload FILE     read-only workload template (never modified)
   --experiment-dir D  root for logs, data and generated workloads
+  --resume-from N     continue an interrupted run at global iteration N: the load phases do not
+                      run, iterations below N are skipped, and the run log, results CSV and
+                      value-size CSVs are appended to instead of rewritten. The databases must
+                      still hold the state the interrupted run left (N > 1).
   --dry-run           resolve configuration, print it, do not benchmark
   --check             run the backend's preflight (server reachable, role allowed,
                       build artifacts present) and exit without benchmarking
@@ -117,6 +121,10 @@ while (($#)); do
         --scale) config::set_cli "SCALE=${2:?--scale needs a name}"; shift 2 ;;
         --workload) config::set_cli "WORKLOAD_FILE=${2:?--workload needs a file}"; shift 2 ;;
         --experiment-dir) config::set_cli "EXPERIMENT_DIR=${2:?--experiment-dir needs a directory}"; shift 2 ;;
+        --resume-from)
+            [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                echo "[error] --resume-from needs a number of iterations, got: ${2:-<empty>}" >&2; exit 2; }
+            config::set_cli "RESUME_FROM_ITERATION=$2"; shift 2 ;;
         --mode)
             case "${2:-}" in
                 mainline | baseline) config::set_cli "EXPERIMENT_MODE=$2"; shift 2 ;;
@@ -193,6 +201,15 @@ results CSV:      $OUTPUT_FILE
 epochs x steps:   ${NUM_EPOCHS} x ${STEPS_PER_EPOCH} (comparison every ${COMPARISON_INTERVAL})
 phases:           $(experiment::describe_phases)
 vacuum:           $VACUUM_ENABLED
+resume from:      ${RESUME_FROM_ITERATION}$(
+    if experiment::resume_active; then
+        printf ' (resuming: no load phases, iterations below it skipped)'
+    fi)
+maintenance:      pause between phases = ${PAUSE_MAINTENANCE} ($(registry::capability supports_maintenance_mode && printf "${ACTIVE_BACKEND} can switch it" || printf "${ACTIVE_BACKEND} has no such switch"))
+idle wait:        every ${IDLE_WAIT_INTERVAL}s, up to ${IDLE_WAIT_TIMEOUT}s per phase
+pause file:       ${PAUSE_FILE} (touch it between iterations to hold the run)
+server marks:     ${SERVER_LOG_MARKS} (phase boundaries written to the server's own log)
+archive config:   ${ARCHIVE_CONFIGURATION} -> ${EXPERIMENT_DIR}/config
 DRYRUN
     exit 0
 fi

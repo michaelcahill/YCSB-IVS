@@ -19,6 +19,125 @@
 # every YCSB invocation gets an immutable generated file from lib/workload.sh, and writes its
 # artefacts under $EXPERIMENT_DIR.
 
+# ---------------------------------------------------------------------------
+# Run-state helpers shared by both engines
+# ---------------------------------------------------------------------------
+
+# Is this run resuming, i.e. must it pick up databases and artefacts an earlier attempt left
+# behind instead of creating them? True from iteration 2 onwards: resuming "at iteration 1" is
+# a fresh run, and treating it as one keeps the initial load from being skipped by accident.
+experiment::resume_active() {
+    (( ${RESUME_FROM_ITERATION:-0} > 1 ))
+}
+
+# Write one marker line into the database server's own log. Phase boundaries in the run log and
+# in postgresql.log (etc.) are then alignable without timestamps, which is what makes an
+# archived server log usable as evidence — see experiment::archive_configuration.
+mark_run_phase() {
+    local db_name="$1" label="${2:-$phase}"
+    [[ "${SERVER_LOG_MARKS:-1}" == 1 ]] || return 0
+    backend::mark_run "$db_name" \
+        "EXPERIMENT RUN=${RUN:-?} EXEC=${EXECUTION_ID:-?} EPOCH=${epoch:-0} ITER=${iteration:-0} PHASE=${label}"
+}
+
+# Which of the two maintenance modes the measured database is in right now ("" = never asked).
+MAINTENANCE_MODE_STATE=""
+
+# Ask the database to stop/start its own background maintenance for one database. Gated on
+# PAUSE_MAINTENANCE and on the backend saying it can do it, so a backend without such a switch
+# is not silently "paused".
+set_maintenance_mode() {
+    local mode="${1:?on or off}" db_name="${2:?database required}"
+    [[ "${PAUSE_MAINTENANCE:-1}" == 1 ]] || return 0
+    registry::capability supports_maintenance_mode || return 0
+    # Repeating a mode the database is already in is normal here (every iteration asks for the
+    # same two switches), so it is not logged as if it were a change.
+    if [[ "$MAINTENANCE_MODE_STATE" != "$mode" ]]; then
+        log "MAINTENANCE mode=$mode database=$db_name background maintenance of the measured table"
+    fi
+    backend::maintenance_mode "$mode" "$db_name"
+    MAINTENANCE_MODE_STATE="$mode"
+}
+
+# Stop between iterations while the pause file exists. Checked at an iteration boundary, never
+# inside a phase, so pausing cannot split a measurement in two; the loop only waits, so no
+# iteration is lost. `touch <PAUSE_FILE>` pauses, removing it continues.
+pause_if_requested() {
+    local pause_file="${PAUSE_FILE:-PAUSE_SCRIPT}" started waited
+    [[ -e "$pause_file" ]] || return 0
+
+    log "PAUSE experiment paused file=$pause_file (remove it to continue)"
+    started=$SECONDS
+    while [[ -e "$pause_file" ]]; do
+        sleep "${PAUSE_CHECK_INTERVAL:-30}"
+    done
+    waited=$((SECONDS - started))
+    log "RESUME experiment continued after ${waited}s paused"
+}
+
+# What a run measured, and under what software: the two things missing from an analysis
+# directory months later. Everything goes into $EXPERIMENT_DIR/config; the resolved
+# configuration is written with credentials masked, because that directory is copied around
+# and published with the results.
+experiment::archive_configuration() {
+    local config_dir="${EXPERIMENT_DIR}/config" file target
+    local -a sources=()
+
+    [[ "${ARCHIVE_CONFIGURATION:-1}" == 1 ]] || return 0
+
+    log "START experiment configuration archive directory=$config_dir"
+    mkdir -p "$config_dir"
+
+    # The resolved configuration: every knob as the run actually used it, not as some file
+    # suggested it. Secrets are masked so the archive can travel with the results.
+    local current="$config_dir/resolved_config.txt" archived_files=0 f
+    # A resumed run must not silently replace the record of the attempt it continues: if any
+    # setting changed between the two, keep the old record and say so. resume_from_iteration is
+    # ignored in that comparison because it describes the attempt, not what is measured.
+    if [[ -s "$current" ]] &&
+        ! diff -q <(grep -vE '^#|^resume_from_iteration=' "$current") \
+                   <(config::describe 2>/dev/null | grep -vE '^#|^resume_from_iteration=') >/dev/null; then
+        mv "$current" "$config_dir/resolved_config.previous_attempt.txt"
+        log "WARNING the configuration changed since the archived attempt; the old record is $config_dir/resolved_config.previous_attempt.txt"
+    fi
+    config::describe > "$current" 2>/dev/null ||
+        log "WARNING could not write $current"
+
+    # The input files, in the order they were applied, plus the workload template. Generated
+    # per-phase workloads are already under $EXPERIMENT_DIR/workloads with a provenance header.
+    [[ -r "$WORKLOAD_FILE" ]] && sources+=("$WORKLOAD_FILE")
+    if (( ${#CONFIG_SOURCES[@]} )); then
+        for file in "${CONFIG_SOURCES[@]}"; do
+            [[ -r "$file" ]] && sources+=("$file")
+        done
+    fi
+    for file in "${sources[@]}"; do
+        target="$config_dir/input_$(basename "$file")"
+        if config::redact_file "$file" > "$target" 2>/dev/null; then
+            # The archive travels with the results: readable by whoever may read the experiment
+            # directory, writable by nobody but the owner.
+            chmod u+r,go-w "$target" 2>/dev/null || true
+        else
+            log "WARNING could not archive input file $file"
+        fi
+    done
+
+    # The server's own configuration and the slice of its log that carries this run's markers;
+    # what it could and could not read is reported by the backend itself.
+    if ! backend::archive_server_state "$config_dir"; then
+        log "WARNING archiving the ${ACTIVE_BACKEND:-?} server state failed"
+    fi
+
+    for f in "$config_dir"/*; do
+        [[ -f "$f" ]] && archived_files=$((archived_files + 1))
+    done
+    log "END experiment configuration archive directory=$config_dir files=$archived_files"
+}
+
+# ---------------------------------------------------------------------------
+# YCSB invocation helpers
+# ---------------------------------------------------------------------------
+
 run_ycsb() {
     local label="$1" started=$SECONDS rc=0
     local detail_file
@@ -124,8 +243,11 @@ run_with_metrics() {
 
     # execute ycsb program including JAVA_OPTS to log garbage collector
     log "START YCSB $phase"
+    mark_run_phase "$db_name"
     set +e
-    JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc-run${RUN}-${phase}-${epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
+    # Underscore-separated: `javagc-run1-reference-3.log` cannot be split into run/phase/epoch
+    # without knowing that the phase name itself contains a dash.
+    JAVA_OPTS="-Xlog:gc*,safepoint:file=${LOG_DIR}/javagc/javagc_run${RUN}_${phase}_epoch${epoch}.log:time,uptime,level,tags:filecount=10,filesize=1M" \
     "$@" > "$output_csv"
     status=$?
     set -e
@@ -163,9 +285,15 @@ run_with_metrics() {
 # tells preflight whether this mode dumps and restores a comparison database (pg_dump is only
 # required then); DATABASE names the databases the mode creates, all three configured names are
 # always validated so that a collision fails before any work is thrown away.
+#
+# When resuming (RESUME_FROM_ITERATION > 1) nothing of the run's state is destroyed: the
+# databases are verified instead of recreated and the artefacts the earlier attempt wrote are
+# kept, because the results CSV, the value-size CSVs and the run log all continue where that
+# attempt stopped.
 experiment_bootstrap() {
     local needs_dump="${1:-true}"
     shift
+    local database
 
     start_logging
     log "START preflight"
@@ -174,6 +302,17 @@ experiment_bootstrap() {
     log "END preflight"
     mkdir -p "$(dirname "$OUTPUT_FILE")" "$(dirname "$KEY_SIZE_FILE_AFTER_EXTEND")"
 
+    if experiment::resume_active; then
+        log "RESUME experiment from iteration ${RESUME_FROM_ITERATION}: keeping databases and artefacts"
+        for database in "$@"; do
+            backend::verify_resume_ready "$database" || return 1
+        done
+        # Later phases read the operation count of the template; the load phase that normally
+        # reads it is one of the phases a resume skips.
+        original_operationcount="${operationcount_override:-$(workload::get_value "$WORKLOAD_FILE" operationcount)}"
+        return 0
+    fi
+
     # Clear the log file and previous backups
     : > "$PLAN_LOG"
     : > "$HISTOGRAM_FILE"
@@ -181,7 +320,6 @@ experiment_bootstrap() {
     rm -rf "$KEY_SIZE_LOG"
     rm -f "$KEY_SIZE_FILE_AFTER_EXTEND" "$KEY_SIZE_FILE_AFTER_RUN"
 
-    local database
     for database in "$@"; do
         backend::init_db "$database"
     done
@@ -242,6 +380,11 @@ run_extend_phase() {
     # the template.
     log "=== Generating the extend workload ==="
     phase="extend"
+
+    # The extend phase is measured *with* background maintenance running: growing values and
+    # having the database clean up after itself is the situation under study. Later phases ask
+    # for the opposite, so this is where it is switched back on again.
+    set_maintenance_mode on "$DB_NAME"
     WORKLOAD_PHASE="$(workload::generate extend "$iteration")"
     workload::apply_context "$WORKLOAD_PHASE"
 
@@ -404,8 +547,14 @@ run_measured_phase() {
 run_reference_phase() {
     snapshot_keys "$UNCHANGED_DB_NAME"
 
-    # wait for all backend processes to finish before doing clean run (max 20 mins)
-    backend::wait_idle "$DB_NAME" 20 1200
+    # Wait for the server to settle before measuring the reference database: work left over
+    # from the phase before (autovacuum on the grown table, a checkpoint) would be charged to
+    # this measurement.
+    backend::wait_idle "$DB_NAME" "${IDLE_WAIT_INTERVAL}" "${IDLE_WAIT_TIMEOUT}"
+
+    # From here to the end of the iteration the measurements must not be disturbed by
+    # maintenance of the table that just grew; the next extend phase turns it back on.
+    set_maintenance_mode off "$DB_NAME"
 
     # Reference workload with unchanging value sizes
     phase="reference"
@@ -440,8 +589,13 @@ run_comparison_phases() {
     backend::dump_restore
     log "Backing up the database finished"
 
-    # wait for all backend processes to finish before doing clean run (max 20 mins)
-    backend::wait_idle "$DB_NAME" 20 1200
+    # wait for all backend processes to finish before doing clean run
+    backend::wait_idle "$DB_NAME" "${IDLE_WAIT_INTERVAL}" "${IDLE_WAIT_TIMEOUT}"
+
+    # The restored copy inherits whatever its settings were when it was dumped, so ask again —
+    # for the copy that is about to be measured as well as for the database it came from.
+    set_maintenance_mode off "$BACKUP_DB_NAME"
+    set_maintenance_mode off "$DB_NAME"
 
     WORKLOAD_PHASE="$(workload::generate clean-run "$iteration")"
     workload::apply_context "$WORKLOAD_PHASE"
@@ -504,8 +658,8 @@ run_comparison_phases() {
     WORKLOAD_PHASE="$(workload::generate avg-run "$iteration")"
     workload::apply_context "$WORKLOAD_PHASE"
 
-    # wait for all backend processes to finish before doing clean run (max 20 mins)
-    backend::wait_idle "$DB_NAME" 20 1200
+    # wait for all backend processes to finish before measuring again
+    backend::wait_idle "$BACKUP_DB_NAME" "${IDLE_WAIT_INTERVAL}" "${IDLE_WAIT_TIMEOUT}"
 
     # Execute the run phase
     log "Preparing run workload: read=$readproportion update=$updateproportion extend=$extendproportion"
@@ -525,6 +679,18 @@ run_comparison_phases() {
 # The completion marker finish_logging requires: a run that returns without it is reported as
 # a failure, whatever its exit status says.
 experiment_complete() {
+    # Never hand back a database with its background maintenance switched off by us: the next
+    # run of the same databases would start paused without anyone asking.
+    if [[ "${MAINTENANCE_MODE_STATE:-}" == off ]]; then
+        set_maintenance_mode on "$DB_NAME"
+    fi
+
+    # One last marker in the server log, so an archived slice of it has an end boundary too.
+    mark_run_phase "$DB_NAME" "END"
+
+    # Record what this run was configured with, while the process still holds that configuration.
+    experiment::archive_configuration
+
     log "=== All steps completed. Results are logged in $LOG_FILE ==="
     EXPERIMENT_COMPLETED=1
 }
@@ -560,27 +726,33 @@ run_experiment_mainline() {
     # The comparison database is created by backend::dump_restore, not here.
     experiment_bootstrap true "$DB_NAME" "$UNCHANGED_DB_NAME"
 
-    # Execute the load phase
-    run_load_phase
+    # A resume starts from the databases an earlier attempt left behind, so it must not load
+    # anything: both load phases run only on a fresh run. Their results are already in the
+    # results CSV that the resume continues to append to.
+    if ! experiment::resume_active; then
+        # Execute the load phase
+        run_load_phase
 
-    # Load unchange value size (reference) DB
-    run_reference_load_phase
+        # Load unchange value size (reference) DB
+        run_reference_load_phase
+    fi
 
     # Experiment parameters
     for epoch in $(seq 1 "$NUM_EPOCHS"); do
         for step in $(seq 1 "$STEPS_PER_EPOCH"); do
 
             iteration=$((STEPS_PER_EPOCH * ($epoch - 1) + $step))
+            (( iteration >= ${RESUME_FROM_ITERATION:-0} )) || continue
 
             run_extend_phase
             vacuum_if_enabled
             run_measured_phase
             run_reference_phase
 
-            # if (( $((STEPS_PER_EPOCH*($epoch-1)+$step)) % 1 == 0 )); then
             if (( COMPARISON_INTERVAL > 0 && iteration % COMPARISON_INTERVAL == 0 )); then
                 run_comparison_phases
             fi
+            pause_if_requested
             log "END iteration"
         done
     done
