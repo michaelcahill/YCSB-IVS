@@ -89,8 +89,19 @@ config::load_file() {
 # Load the per-backend credential/endpoint file when it exists. Everything else in
 # conf/ is applied explicitly with --config, because a preset that silently changed the
 # dataset size would change what a run measures.
+#
+# A backend may name a family (conf_family in its info block): db.<family>.env carries the
+# settings several backends share on one server — the four PostgreSQL schemas share
+# db.postgresql.env, which is also where the --init administrator connection lives. The
+# per-backend file loads after it and wins on a clash; both lose to the environment.
 config::load_layered_files() {
-    local file="$CONF_DIR/db.$ACTIVE_BACKEND.env"
+    local file family
+    family="$(registry::info conf_family)"
+    if [[ -n "$family" ]]; then
+        file="$CONF_DIR/db.$family.env"
+        [[ -r "$file" ]] && config::load_file "$file"
+    fi
+    file="$CONF_DIR/db.$ACTIVE_BACKEND.env"
     [[ -r "$file" ]] && config::load_file "$file"
     return 0
 }

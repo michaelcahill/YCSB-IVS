@@ -34,7 +34,7 @@
 #   * endpoints come from configuration instead of a hardcoded 127.0.0.1, and the buckets may be
 #     created by the runner when COUCHBASE_CREATE_MISSING_BUCKETS=1 (the default). Where the
 #     benchmark role may not create them, set it to 0 and create three buckets plus three
-#     bucket-named users beforehand - see conf/db.couchbase.env.example.
+#     bucket-named users beforehand - see conf/db.couchbase.env.
 #
 # The 22 statistics columns are the legacy list in the legacy order (the header of
 # experiment_couchbase_baseline.sh, kept as data in tests/golden/legacy_csv_columns.txt and

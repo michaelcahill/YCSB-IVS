@@ -74,8 +74,8 @@ mkdir -p analysis/Data/Baseline_data analysis/Data/Value_size_data analysis/Data
    a full path from anywhere. Every backend — including the PostgreNoSQL document store
    (`./experiment.sh postgrenosql`, schema `YCSB_KEY` + `YCSB_VALUE JSONB`) — is selected
    by name; schemas are created automatically, and connection parameters come from
-   `experiment_scripts/conf/db.<backend>.env` (copy the `.example`; never hardcode
-   credentials in scripts).
+   `experiment_scripts/conf/db.postgresql.env` / `conf/db.<backend>.env` (committed with
+   working defaults; real passwords go in environment variables, never in scripts).
 
 3. **View results**:
    Each run writes to its own directory under `analysis/experiments/ycsb_<name>/`
@@ -90,8 +90,9 @@ mkdir -p analysis/Data/Baseline_data analysis/Data/Value_size_data analysis/Data
   immutable copies under the experiment directory's `workloads/`
 - Ensure database servers are running and configured before executing experiments;
   `./experiment.sh <backend> --check` verifies one backend without benchmarking
-- Database connection parameters live in `experiment_scripts/conf/db.<backend>.env`
-  (gitignored, parsed not executed); run `tools/deploy.sh` to ship the harness to an EC2 host
+- Database connection parameters live in `experiment_scripts/conf/db.postgresql.env` and
+  `conf/db.<backend>.env` (committed defaults, parsed not executed); run `tools/deploy.sh`
+  to ship the harness to an EC2 host
 
 ## Requirements
 

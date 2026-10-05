@@ -79,6 +79,12 @@ Options:
   --dry-run           resolve configuration, print it, do not benchmark
   --check             run the backend's preflight (server reachable, role allowed,
                       build artifacts present) and exit without benchmarking
+  --init              prepare the server for this backend and exit: PostgreSQL grants the
+                      benchmark role the rights to read the server's own log (autovacuum,
+                      checkpoints, errors) and sets the logging that writes it. The admin
+                      connection comes from conf/db.postgresql.env (default: sudo -u postgres)
+                      unless the benchmark role is a superuser; touches no data, so it is safe
+                      before or between runs. See the runbook's "Server-Side Evidence" section.
   --list-backends     list backends and exit
   -h, --help          this help
 
@@ -86,7 +92,7 @@ Workload files are never modified: each YCSB phase gets a generated copy under
 $EXPERIMENT_DIR/workloads built from the template plus that phase's settings.
 
 Configuration precedence (later wins): built-in defaults, backend defaults,
-conf/db.<backend>.env, --config FILE, environment, CLI flags.
+conf/db.<family>.env, conf/db.<backend>.env, --config FILE, environment, CLI flags.
 Every setting can also be given as an environment variable (see lib/config.sh).
 USAGE
 }
@@ -94,6 +100,7 @@ USAGE
 BACKEND=""
 DRY_RUN=0
 CHECK_ONLY=0
+INIT_ACCESS=0
 CONFIG_FILES=()
 declare -a VAR_OVERRIDES=()
 
@@ -132,6 +139,7 @@ while (($#)); do
             esac ;;
         --dry-run) DRY_RUN=1; shift ;;
         --check) CHECK_ONLY=1; shift ;;
+        --init) INIT_ACCESS=1; shift ;;
         -*) echo "[error] unknown option: $1" >&2; usage >&2; exit 2 ;;
         *)
             [[ -z "$BACKEND" ]] || { echo "[error] unexpected argument: $1" >&2; exit 2; }
@@ -164,6 +172,22 @@ fi
 config::init_defaults
 # Paths are derived last so that any layer above renames every artefact consistently.
 config::derive_paths
+
+if (( INIT_ACCESS )); then
+    # Server-side preparation only — grants and logging settings, never data. It is a separate
+    # mode because it needs an administrator while the run itself deliberately does not.
+    if ! registry::capability supports_init_access; then
+        echo "[init] $ACTIVE_BACKEND has no server-side access to prepare (--init is for the" >&2
+        echo "       PostgreSQL backends, which archive their server's own log)" >&2
+        exit 2
+    fi
+    if backend::init_access; then
+        echo "[init] $ACTIVE_BACKEND prepared for server-side evidence"
+        exit 0
+    fi
+    echo "[init] $ACTIVE_BACKEND NOT fully prepared (see the messages above)" >&2
+    exit 1
+fi
 
 if (( CHECK_ONLY )); then
     # Exactly the checks run_experiment performs before it touches anything: this is how a
