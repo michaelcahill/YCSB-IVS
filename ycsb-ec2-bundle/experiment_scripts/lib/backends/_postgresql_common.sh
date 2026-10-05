@@ -112,7 +112,7 @@ backend::collect_metrics() {
     local extra_select="" extra_joins=""
     local -a values names=("${global_metric_names[@]}")
     local dbmetrics relssizestats relsizes
-    
+
     if [[ "$scope" == all ]]; then
         names=("${metric_field_names[@]}")
         for alias in u t; do
@@ -222,7 +222,7 @@ backend::collect_metrics() {
 			log "DB statistics $relssizestats"
 		done <<< "$size_output"
 	fi
-	
+
     log "END statistics snapshot database=$db statistics=${#names[@]} relsizes=$relsizes"
 }
 
@@ -309,6 +309,20 @@ backend::preflight() {
     fi
     # Probe globals in the maintenance DB; it has no benchmark table yet.
     backend::collect_metrics "$PG_MAINTENANCE_DB" global || return 1
+    # Not a failure: a run measures correctly without the server's own log, it just loses the
+    # explanation of what the server did during it. Saying it here is what stops that from being
+    # discovered in the archived configuration days later. `--init` fixes it.
+    if [[ "${ARCHIVE_CONFIGURATION:-1}" == 1 ]]; then
+        local log_access
+        # verify_log_access prints its reason on stdout and returns non-zero; empty means it is all
+        # in place, in which case there is nothing to say.
+        log_access=$(postgresql::verify_log_access "$DB_USERNAME") || true
+        if [[ -n "$log_access" ]]; then
+            echo "[WARNING] Server-side evidence (autovacuum, checkpoints, errors) will NOT be"
+            echo "          archived: $log_access"
+            echo "          Prepare the server with: ./experiment.sh $ACTIVE_BACKEND --init"
+        fi
+    fi
     echo "[INFO] PG18 preflight passed on $DB_HOST:$DB_PORT (server_version_num=$server_version)."
 }
 
@@ -432,9 +446,19 @@ postgresql::install_log_marker() {
     local privileged=""
     local fn_body="BEGIN RAISE LOG '%', msg; END;"
 
-    privileged=$(backend::exec -d "$db" -At -c "SELECT current_setting('is_superuser');" 2>/dev/null) || privileged=""
+    # A superuser, or a role --init granted SET on the two logging parameters. Without them a
+    # marker arrives with CONTEXT and STATEMENT lines around it, and the archived slice is then
+    # three lines per phase instead of one.
+    privileged=$(backend::exec -d "$db" -At -c "
+        SELECT CASE
+            WHEN current_setting('is_superuser') = 'on' THEN 'on'
+            WHEN has_parameter_privilege(current_user, 'log_error_verbosity', 'SET') AND
+                 has_parameter_privilege(current_user, 'log_min_error_statement', 'SET')
+            THEN 'on' ELSE 'off' END;" 2>/dev/null) || privileged=""
 
     if [[ "$privileged" == "on" ]]; then
+        # A superuser grants itself; any other role already holds it from --init, and a failing
+        # GRANT here is what falls through to the unadorned variant below.
         backend::exec -d "$db" -q -c "
             GRANT SET ON PARAMETER log_min_error_statement TO \"$DB_USERNAME\";
             GRANT SET ON PARAMETER log_error_verbosity TO \"$DB_USERNAME\";" >/dev/null 2>&1 || true
@@ -562,12 +586,12 @@ backend::archive_server_state() {
     log_dir=$(backend::exec -d "$PG_MAINTENANCE_DB" -At -c \
         "SELECT current_setting('log_directory', true);" 2>/dev/null) || log_dir=""
     [[ -n "$log_dir" ]] || {
-        log 'ARCHIVE server log skipped: log_directory not visible to this role\n'
+        log 'ARCHIVE server log skipped: log_directory not visible to this role'
         return 0
     }
     files=$(backend::exec -d "$PG_MAINTENANCE_DB" -At -F '|' -c \
         "SELECT name, size FROM pg_catalog.pg_ls_logdir() ORDER BY modification DESC;" 2>/dev/null) || {
-        log 'ARCHIVE server log skipped: log directory not listable (needs pg_read_server_files)\n'
+        log 'ARCHIVE server log skipped: log directory not listable (needs pg_monitor)'
         return 0
     }
 
@@ -604,6 +628,342 @@ backend::archive_server_state() {
         fi
     done <<< "$files"
 
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Preparing a server for a run (--init)
+#
+# Whether a run gets its server-side evidence — the autovacuum report, the checkpoints, the
+# errors between two phases — is decided by the server, not by the runner: a few grants to the
+# benchmark role and a handful of logging settings. --init applies them once, verifies them from
+# the benchmark role's point of view, and says what still needs a restart, so a ten-hour run
+# never ends by discovering that the evidence was never written or never readable.
+#
+# What is required is exactly what backend::archive_server_state and mark_run do:
+#   pg_monitor             current_setting('log_directory') is only visible with
+#                          pg_read_all_settings, and pg_ls_logdir() is only executable by it;
+#   pg_read_server_files   the check inside pg_read_file(), which rejects reads even when the
+#                          function itself is executable;
+#   EXECUTE on pg_read_file(text)  PostgreSQL >= 16 grants no execute on it to anything, and
+#                          function privileges live in a database, so this one has to be applied
+#                          in $PG_MAINTENANCE_DB — the database the archiver connects to.
+# Phase markers are RAISE LOG, and LOG is always logged, so log_min_messages needs no change;
+# log_autovacuum_min_duration=0 is what makes an autovacuum appear in the log at all.
+# ---------------------------------------------------------------------------
+
+# The administrative connection: init GRANTs and ALTERs SYSTEM, which the benchmark role has no
+# reason to be allowed to do while it is measuring. It defaults to the benchmark role itself,
+# which is how a single-role server (the usual benchmark machine) is prepared without a second
+# password; PG_INIT_ADMIN_USERNAME / PG_INIT_ADMIN_PWD name an administrator instead, and
+# PG_INIT_ADMIN_HOST / PG_INIT_ADMIN_PORT reach it on another endpoint.
+#
+# PG_INIT_ADMIN_CLI_WRAP puts something in front of psql — `sudo -u postgres`, or
+# `podman exec -i ycsb_postgres` when the server runs in a container. That is how most
+# PostgreSQL installs are administered at all, since the superuser is reachable through the OS
+# account (peer/trust on the unix socket) and often through nothing else: pg_hba rarely lets a
+# superuser in over TCP with a password. A wrapped command therefore reaches the server as that
+# OS user sees it, so the endpoint arguments are dropped — exactly as with the other backends'
+# *_CLI_WRAP — and PG_INIT_ADMIN_USERNAME names the role to become there.
+pg_cli_admin() {
+    local tool="${1:?tool required}"
+    shift
+    local started=$SECONDS rc=0 db="" arg previous="" sql="" action="$tool"
+    for arg in "$@"; do
+        [[ "$previous" != -d ]] || db="$arg"
+        if [[ "$previous" == -c && -z "$sql" ]]; then
+            read -r action _ <<< "${arg#"${arg%%[![:space:]]*}"}"
+        fi
+        previous="$arg"
+    done
+    log "START PostgreSQL administration tool=$tool action=$action database=${db:-unspecified}"
+
+    local -a wrap=() conn=(--username="${PG_INIT_ADMIN_USERNAME:-$DB_USERNAME}")
+    if [[ -z "${PG_INIT_ADMIN_CLI_WRAP:-}" ]]; then
+        conn=(--host="${PG_INIT_ADMIN_HOST-$DB_HOST}" --port="${PG_INIT_ADMIN_PORT-$DB_PORT}" "${conn[@]}")
+    else
+        read -r -a wrap <<< "$PG_INIT_ADMIN_CLI_WRAP"
+    fi
+    # Do not log arguments: they can contain credentials. stdin is closed deliberately: a wrapper
+    # that attaches it (`podman exec -i …`) would otherwise read the caller's input and leave the
+    # rest of a loop unseen.
+    PGPASSWORD="${PG_INIT_ADMIN_PWD:-$DB_PWD}" PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-10}" \
+        "${wrap[@]}" "$tool" --no-password "${conn[@]}" "$@" < /dev/null || rc=$?
+    log "END PostgreSQL administration tool=$tool action=$action database=${db:-unspecified} status=$rc duration=$((SECONDS-started))s"
+    return "$rc"
+}
+
+# The settings that make the server write the evidence, as "name|value|reloadable?". A setting
+# whose value already agrees is left alone, so init never rewrites a deliberate choice.
+postgresql::init_settings() {
+    printf 'autovacuum|on|reload\n'
+    printf 'log_destination|stderr|reload\n'
+    printf 'logging_collector|on|restart\n'
+    printf 'log_autovacuum_min_duration|0|reload\n'
+    printf 'log_checkpoints|on|reload\n'
+    printf 'log_lock_waits|on|reload\n'
+    printf 'max_wal_size|16GB|reload\n'
+    printf 'track_counts|on|reload\n'
+}
+
+# One setting changed in postgresql.auto.conf. A log_line_prefix is full of brackets and percent
+# signs, so the value needs quoting; it must not arrive through a psql variable, because that
+# would mean reading stdin (see the function).
+postgresql::alter_system() {
+    local name="${1:?setting required}" value="${2:?value required}"
+    # Quoted by doubling single quotes rather than as a psql variable: psql interpolates variables
+    # only from stdin, and an administrator command that reads stdin would steal the input of a
+    # wrapped connection (`podman exec -i`) from whatever is really feeding it. Both arguments
+    # come from this file's own list, never from configuration.
+    pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -q -c \
+        "ALTER SYSTEM SET $name = '${value//\'/\'\'}'"
+}
+
+# Can $1 (the benchmark role) see, list and read the server's own log? Prints the first thing
+# that is missing and returns 1; prints nothing and returns 0 when all three work. Runs as an
+# admin but through SET ROLE, so it asks the question the way the run will — and needs no second
+# password for the role being tested.
+#
+# The privilege questions are asked of the catalog first, because they can be answered whatever
+# the server is doing; only then come the questions that need a log file to exist. Reporting a
+# missing pg_monitor membership as "could not open directory" — or the other way round — sends an
+# operator to the wrong machine.
+postgresql::verify_log_access() {
+    local role="${1:?role required}" missing collector files newest
+
+    missing=$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -c "
+        SELECT CASE
+            WHEN NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '$role')
+                THEN 'the role does not exist'
+            WHEN NOT (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = '$role') AND NOT (
+                     SELECT rolinherit FROM pg_catalog.pg_roles WHERE rolname = '$role')
+                THEN 'it is NOINHERIT, so no membership it has takes effect (CREATE ROLE defaults
+                      to that; ALTER ROLE ... INHERIT, or the runner must SET ROLE)'
+            WHEN NOT pg_has_role('$role', 'pg_monitor', 'USAGE')
+                THEN 'it lacks pg_monitor, which is what makes log_directory visible and
+                      pg_ls_logdir() executable'
+            WHEN NOT (pg_has_role('$role', 'pg_read_server_files', 'USAGE') AND
+                      has_function_privilege('$role', 'pg_read_file(text)', 'EXECUTE'))
+                THEN 'it lacks pg_read_server_files, or EXECUTE on pg_read_file(text) in this
+                      database (a per-database privilege, and the archiver connects to
+                      $PG_MAINTENANCE_DB)'
+            ELSE 'ok' END;" 2>/dev/null) || missing='the catalog query failed'
+    if [[ "$missing" != ok ]]; then
+        # The CASE above is written over several lines; the message it returns must not be.
+        echo "$role cannot read the server's own log: $(printf '%s' "$missing" | tr '\n\t' '  ' | tr -s ' ')"
+        return 1
+    fi
+
+    # Privileges are in place; is there a log to read at all? A server that does not collect one
+    # sends its log to its own stderr, where no SQL function can reach it.
+    collector=$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -c \
+        "SELECT current_setting('logging_collector');" 2>/dev/null) || collector=''
+    [[ "$collector" == on ]] || {
+        echo "logging_collector is off, so the server keeps no log files to archive"
+        return 1
+    }
+    # -q because a SET ROLE prints a command tag, and only the query result may reach $files.
+    files=$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -q -c \
+        "SET ROLE \"$role\"; SELECT name FROM pg_catalog.pg_ls_logdir()
+         ORDER BY modification DESC;" 2>/dev/null) || {
+        echo "$role may not list the log directory (pg_ls_logdir failed)"
+        return 1
+    }
+    [[ -n "$files" ]] || {
+        # The usual reason is a destination that bypasses the collector's files entirely.
+        local destination
+        destination=$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -c \
+            "SELECT current_setting('log_destination');" 2>/dev/null) || destination='unknown'
+        echo "the log directory holds no files (log_destination=$destination): only stderr,"
+        echo "csvlog and jsonlog are written where pg_ls_logdir() can see them"
+        return 1
+    }
+    newest=$(printf '%s\n' "$files" | head -1)
+    # Log file names come from the server's own directory listing; refuse anything that is not a
+    # plain file name rather than interpolating it into SQL.
+    [[ "$newest" =~ ^[A-Za-z0-9._-]+$ ]] || {
+        echo "unexpected log file name from pg_ls_logdir(): $newest"
+        return 1
+    }
+    pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -q -c "
+        SET ROLE \"$role\";
+        SELECT length(pg_read_file(rtrim(current_setting('log_directory'), '/') || '/$newest'));" \
+        >/dev/null 2>&1 || {
+        echo "$role may not read $newest from the log directory"
+        return 1
+    }
+    return 0
+}
+
+# The strongest check there is: write a LOG line now and read it back through the same three
+# functions the archiver uses. A message can sit in the collector's queue for a moment, hence
+# the short retry.
+postgresql::verify_marker_round_trip() {
+    local role="${1:?role required}" token attempt hit
+    token="YCSB-INIT-CHECK-$$-$RANDOM"
+
+    # No % in the message: PL/pgSQL reads % as a placeholder, and this line is written by the
+    # administrator connection, not by the measured role.
+    pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -q -c \
+        "DO \$\$ BEGIN RAISE LOG 'EXPERIMENT INIT $token'; END \$\$;" || return 1
+
+    for attempt in 1 2 3 4 5;
+    do
+        sleep 1
+        hit=$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -q -c "
+            SET ROLE \"$role\";
+            -- The path is relative to the data directory, exactly as backend::archive_server_state
+            -- builds it: pg_ls_logdir reports bare names, pg_read_file wants them prefixed with
+            -- log_directory.
+            SELECT count(*) FROM (
+                SELECT pg_read_file(rtrim(current_setting('log_directory'), '/') || '/' || name) AS body
+                FROM (
+                    SELECT name FROM pg_catalog.pg_ls_logdir() ORDER BY modification DESC LIMIT 1
+                ) newest
+            ) recent WHERE position('$token' IN recent.body) > 0;" 2>/dev/null) || hit=0
+        [[ "$hit" != 0 && -n "$hit" ]] && return 0
+    done
+    echo "$role could not read back a LOG line it had just written"
+    return 1
+}
+
+# Apply everything a run needs from the server. Idempotent: reads first, changes only what
+# differs, and reports each change (and what still waits for a restart).
+backend::init_access() {
+    local role="${PG_INIT_TARGET_ROLE:-$DB_USERNAME}"
+    local name value reload current state changed=0 needs_restart=0 missing
+
+    if [[ ! "$role" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        echo "[ERROR] Refusing to prepare grants for an unexpected role name: $role" >&2
+        return 1
+    fi
+    state=$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -c \
+        "SELECT current_setting('is_superuser'), current_setting('server_version_num')::int;" \
+        2>/dev/null) || state=""
+    # Nothing above this point touched the server, so refusing here leaves nothing half-applied.
+    if [[ -z "$state" ]]; then
+        echo "[ERROR] --init cannot connect to $DB_HOST:$DB_PORT as" >&2
+        echo "        ${PG_INIT_ADMIN_USERNAME:-$DB_USERNAME} (the administrator role)." >&2
+        return 1
+    fi
+    if [[ "$state" != "on|"* ]]; then
+        echo "[ERROR] --init refuses to continue: ${PG_INIT_ADMIN_USERNAME:-$DB_USERNAME} is not a" >&2
+        echo "        superuser. It changes server settings as well as grants, so anything less" >&2
+        echo "        would leave the preparation half-applied." >&2
+        echo "        Point PG_INIT_ADMIN_USERNAME / PG_INIT_ADMIN_PWD at an administrator role;" >&2
+        echo "        the run itself needs no more than $role." >&2
+        return 1
+    fi
+    if (( ${state#*|} < 180000 )); then
+        echo "[ERROR] --init supports PostgreSQL >= 18; got ${state#*|}." >&2
+        return 1
+    fi
+
+    echo "[INFO] Preparing $DB_HOST:$DB_PORT so that $role can archive the server's own evidence."
+
+    while IFS='|' read -r name value reload; do
+        [[ -n "$name" ]] || continue
+        current=$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -c \
+            "SELECT current_setting('$name');" 2>/dev/null) || current=""
+        if [[ "$current" == "$value" ]]; then
+            echo "[INFO] setting $name already $value"
+            continue
+        fi
+        # csvlog and jsonlog are readable by the archiver too; only replace a destination that
+        # writes nothing the slicer could use.
+        if [[ "$name" == log_destination && "$current" =~ ^(stderr|csvlog|jsonlog)$ ]]; then
+            echo "[INFO] setting log_destination left at $current (readable by the archiver)"
+            continue
+        fi
+        if postgresql::alter_system "$name" "$value"; then
+            echo "[INFO] setting $name = $value (was ${current:-unset}, needs $reload)"
+            changed=$((changed + 1))
+            [[ "$reload" == restart ]] && needs_restart=1
+        else
+            echo "[ERROR] Could not set $name=$value with ALTER SYSTEM." >&2
+            return 1
+        fi
+    done < <(postgresql::init_settings)
+
+    # A prefix without a timestamp cannot be aligned with the run log.
+    current=$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -c \
+        "SELECT current_setting('log_line_prefix');" 2>/dev/null) || current=""
+    if [[ "$current" != *%m* && "$current" != *%t* ]]; then
+        postgresql::alter_system log_line_prefix '%m [%p] %q%u@%d ' &&
+            echo "[INFO] setting log_line_prefix = '%m [%p] %q%u@%d ' (was '${current:-empty}'; it must carry a timestamp)" ||
+            return 1
+        changed=$((changed + 1))
+    fi
+
+    # CREATE ROLE defaults to NOINHERIT (CREATE USER does not), and a NOINHERIT role gets
+    # nothing from a membership — the grants below would be granted and useless.
+    if [[ "$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -c \
+            "SELECT rolinherit FROM pg_catalog.pg_roles WHERE rolname = '$role';" 2>/dev/null)" != t ]]; then
+        pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -q -c "ALTER ROLE \"$role\" INHERIT;" || return 1
+        echo "[INFO] role $role is now INHERIT (it was NOINHERIT: memberships would not apply)"
+    fi
+
+    for name in pg_monitor pg_read_server_files; do
+        if [[ "$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -c \
+                "SELECT pg_has_role('$role', '$name', 'MEMBER');" 2>/dev/null)" == t ]]; then
+            echo "[INFO] role $role already a member of $name"
+        elif pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -q -c \
+                "GRANT \"$name\" TO \"$role\";"; then
+            echo "[INFO] granted $name to $role"
+        else
+            echo "[ERROR] Could not grant $name to $role." >&2
+            return 1
+        fi
+    done
+
+    # Per-database, and the archiver reads through $PG_MAINTENANCE_DB.
+    if [[ "$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -c \
+            "SELECT has_function_privilege('$role', 'pg_read_file(text)', 'EXECUTE');" 2>/dev/null)" == t ]]; then
+        echo "[INFO] role $role may already execute pg_read_file(text) in $PG_MAINTENANCE_DB"
+    elif pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -q -c \
+            "GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO \"$role\";"; then
+        echo "[INFO] granted EXECUTE on pg_read_file(text) to $role in $PG_MAINTENANCE_DB"
+    else
+        echo "[ERROR] Could not grant EXECUTE on pg_read_file(text) to $role in $PG_MAINTENANCE_DB." >&2
+        return 1
+    fi
+
+    # Parameter privileges are cluster-wide, and they are what lets the marker function set the
+    # two logging parameters that keep a marker to one line (see postgresql::install_log_marker).
+    if [[ "$(pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -c \
+            "SELECT has_parameter_privilege('$role', 'log_error_verbosity', 'SET');" 2>/dev/null)" == t ]]; then
+        echo "[INFO] role $role may already set the two logging parameters of a marker"
+    elif pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -q -c "
+            GRANT SET ON PARAMETER log_min_error_statement TO \"$role\";
+            GRANT SET ON PARAMETER log_error_verbosity TO \"$role\";"; then
+        echo "[INFO] granted SET on log_min_error_statement and log_error_verbosity to $role"
+    else
+        echo "[ERROR] Could not grant SET on the two logging parameters of a marker to $role." >&2
+        return 1
+    fi
+
+    (( changed )) && pg_cli_admin psql -d "$PG_MAINTENANCE_DB" -At -c 'SELECT pg_reload_conf();' >/dev/null &&
+        echo "[INFO] Configuration reloaded."
+
+    if ! missing=$(postgresql::verify_log_access "$role"); then
+        # The one expected reason is the restart logging_collector needs: say so instead of
+        # reporting an operator error for something they are about to do.
+        if (( needs_restart )); then
+            echo "[WARNING] Not verified yet: logging_collector was switched on, and it only takes" >&2
+            echo "          effect after a server restart ($missing)." >&2
+            echo "          Restart the server, then run --init again to verify; the grants" >&2
+            echo "          applied above need no restart." >&2
+        else
+            echo "[ERROR] $role still cannot read the server log: $missing" >&2
+        fi
+        return 1
+    fi
+    if ! missing=$(postgresql::verify_marker_round_trip "$role"); then
+        echo "[ERROR] $missing — the phase markers and the evidence between them would be archived" >&2
+        echo "        as an empty slice." >&2
+        return 1
+    fi
+    echo "[INFO] Verified: $role can list and read the server log, and reads back its own LOG lines."
     return 0
 }
 
