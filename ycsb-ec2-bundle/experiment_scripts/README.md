@@ -18,8 +18,13 @@ were deleted with refactor step 8c (recoverable from the `pre-refactor-scripts` 
 ./experiment.sh --list-backends                 # what exists here
 ./experiment.sh postgresql_textarray --check    # is the server reachable / role allowed?
 ./experiment.sh postgresql_textarray --dry-run  # resolved config, phases, paths — runs nothing
+./experiment.sh postgresql_row --init           # prepare the server for its own evidence
 DB_PWD='***' ./experiment.sh postgresql_textarray --config conf/experiments/smoke.env
 ```
+
+Endpoint and role come from the committed `conf/db.postgresql.env` (shared by all four
+PostgreSQL backends) or a per-backend `conf/db.<backend>.env`; exported variables always win,
+so a machine-specific password is an environment variable, not an edit.
 
 `--check` runs the backend's preflight (server reachable, role may create/drop the probe
 databases, build artifacts present) and exits. It is the fastest way to separate "not
@@ -51,7 +56,7 @@ and no longer resolve. PostgreSQL backends require PostgreSQL ≥ 18
 you run: `psql`/`createdb`/`dropdb`/`pg_dump` (PostgreSQL family), `mysql`/`mysqldump`
 (MariaDB), `mongosh`/`mongodump`/`mongorestore` (MongoDB), `cypher-shell` (Neo4j), `curl`
 (Couchbase REST). `tmux` for long EC2 runs. PostgreSQL backends require the PostgreSQL 18
-client tools; each `conf/db.<backend>.env.example` documents its backend's exact needs,
+client tools; each committed `conf/db.<backend>.env` documents its backend's exact needs,
 including how to run admin CLIs through a container (`*_CLI_WRAP`).
 
 ## Modes and Phases
@@ -68,19 +73,21 @@ CSV schema is identical between modes.
 
 ## Configuration
 
-Precedence (later wins): built-in defaults → backend defaults → `conf/db.<backend>.env`
-→ `--config FILE` → environment → CLI flags. Config files are **parsed, not executed**
-(comments + `KEY=VALUE` only). Details and parsing rules: `conf/README.md`.
+Precedence (later wins): built-in defaults → backend defaults → `conf/db.<family>.env` →
+`conf/db.<backend>.env` → `--config FILE` → environment → CLI flags. Config files are
+**parsed, not executed** (comments + `KEY=VALUE` only). Details and parsing rules:
+`conf/README.md`.
 
 ```bash
-cp conf/db.postgresql.env.example conf/db.postgresql_textarray.env   # endpoint + credentials, 0600
 ./experiment.sh postgresql_textarray --scale heavy --config conf/scale.heavy.env \
     --epochs 10 --steps 10 --run-id 3 --var VACUUM_ENABLED=1
 ```
 
-- `conf/db.<backend>.env` is loaded automatically when present and holds endpoint, role,
-  credentials — it is gitignored; start from the `.example`, which documents every
-  backend-specific knob (container wrappers, driver jars, bucket users).
+- `conf/db.<family>.env` and `conf/db.<backend>.env` are loaded automatically when present
+  and hold endpoint, role and credentials with working defaults plus commented options (the
+  four PostgreSQL backends share `db.postgresql.env`, which also carries the `--init` admin
+  connection). Machine-specific values — especially real passwords — go in exported
+  environment variables, which beat the file.
 - Scale presets are applied explicitly with `--config conf/scale.heavy.env` or
   `--config conf/scale.light.env` (an auto-loaded preset could silently resize a
   dataset). `--scale NAME` only selects the name used in artefact names.
@@ -124,8 +131,86 @@ cp conf/db.postgresql.env.example conf/db.postgresql_textarray.env   # endpoint 
 --resume-from N       continue an interrupted run at global iteration N (see "Pause, Resume")
 --dry-run             print resolved configuration and exit
 --check               run preflight and exit
+--init                prepare the server for a backend and exit (see "Server-Side Evidence")
 --list-backends       list backends and exit
 ```
+
+## Server-Side Evidence
+
+A PostgreSQL run archives more than its own numbers: `$EXPERIMENT_DIR/config/` holds the
+server's `postgresql.conf`, the settings that were in force, and the slice of the server's own
+log between this run's first and last phase marker — which is where the autovacuum report, the
+checkpoints and the errors between two phases live.
+
+Whether that archive has anything in it is a property of the **server**, not of the run, so it is
+prepared once with:
+
+```bash
+./experiment.sh postgresql_row --init
+```
+
+The administrator connection ships in `conf/db.postgresql.env`, where the default is the usual
+case — most PostgreSQL installs admit the superuser only through the OS account (peer or trust
+on the unix socket, often nothing else), so the admin `psql` is wrapped:
+
+```bash
+PG_INIT_ADMIN_CLI_WRAP=sudo -u postgres
+PG_INIT_ADMIN_USERNAME=postgres
+```
+
+A wrapped `psql` reaches the server as that OS user sees it, so `--host`/`--port` are not passed at
+all and no password is needed; `PG_INIT_ADMIN_USERNAME` only names the role to become. Point the
+wrap elsewhere when the server lives in a container on this machine:
+`PG_INIT_ADMIN_CLI_WRAP='podman exec -i ycsb_postgres'`. Without any wrap the admin connection
+goes to `$DB_HOST:$DB_PORT`, or to `PG_INIT_ADMIN_HOST` / `PG_INIT_ADMIN_PORT` (set
+`PG_INIT_ADMIN_HOST=` empty for a local socket on this host), with `PG_INIT_ADMIN_PWD`. Either way
+the run itself still connects as `DB_USERNAME@DB_HOST:DB_PORT`: all of this affects `--init`
+alone.
+
+`--init` needs a superuser connection and **fails rather than doing half of it** — the run itself
+never does, and neither does anything else in the harness. The benchmark role keeps LOGIN +
+CREATEDB only; when it *is* a superuser, `--init` uses it directly and none of the
+`PG_INIT_ADMIN_*` settings are consulted.
+
+What it applies, in `$PG_MAINTENANCE_DB` (default `postgres`):
+
+| What | Why the run needs it |
+| --- | --- |
+| `log_autovacuum_min_duration = 0` | **the setting that decides whether an autovacuum appears in the log at all** — the default `-1`/10 min hides exactly the report a measurement wants explained |
+| `logging_collector = on` | without a collector the server writes its log to its own stderr, where no SQL function can reach it. Needs a **restart**, so `--init` reports it and asks to be re-run afterwards |
+| `log_checkpoints`, `log_lock_waits`, `autovacuum`, `track_counts` | the other server-side events a phase can be delayed by, and the counters the results CSV reports |
+| `log_line_prefix` carrying `%m` | a server-side line that cannot be timestamped cannot be aligned with the run log |
+| `GRANT pg_monitor` | `log_directory` is not visible, and `pg_ls_logdir()` not executable, without it |
+| `GRANT pg_read_server_files` + `EXECUTE ON FUNCTION pg_read_file(text)` | what `pg_read_file()` checks internally. The function privilege is **per database** and lives in `$PG_MAINTENANCE_DB`, the database the archiver connects to — granting it in a benchmark database does nothing |
+| `GRANT SET ON PARAMETER log_min_error_statement, log_error_verbosity` | keeps a phase marker to one line instead of three (`CONTEXT:`/`STATEMENT:` around it) |
+| `ALTER ROLE … INHERIT` when needed | `CREATE ROLE` defaults to `NOINHERIT`, and a `NOINHERIT` role gets nothing from any membership: the grants would exist and do nothing |
+
+Everything is read before it is written, so `--init` is idempotent — run it again after a restart,
+a configuration-management pass or a `pg_resetwal`, and it reports what (if anything) drifted:
+
+```
+[INFO] setting log_autovacuum_min_duration = 0 (was 10min, needs reload)
+[INFO] granted pg_read_server_files to ycsb
+[INFO] Verified: ycsb can list and read the server log, and reads back its own LOG lines.
+[init] postgresql_row prepared for server-side evidence
+```
+
+The verification is not a privilege query: `--init` writes a `LOG` line and reads it back through
+the same three functions the archiver uses (`log_directory`, `pg_ls_logdir()`, `pg_read_file()`),
+as the benchmark role via `SET ROLE`. That is the difference between "the grants look right" and
+"this run's evidence will be in the archive".
+
+`--check` then reports the state on every later run, so a server that drifted back is noticed
+before a ten-hour run finishes rather than after it:
+
+```
+[WARNING] Server-side evidence (autovacuum, checkpoints, errors) will NOT be
+          archived: ycsb cannot read the server's own log: it lacks pg_monitor, ...
+          Prepare the server with: ./experiment.sh postgresql_row --init
+```
+
+It stays a warning: a run measures correctly without the server's own log, it only loses the
+explanation of what the server did during it.
 
 ## Deploying to EC2
 
@@ -345,6 +430,8 @@ into the server's own log (`EXPERIMENT RUN=<run> EXEC=<execution-id> EPOCH=<e>
 ITER=<i> PHASE=<phase>`), and the archived slice of that log at
 `config/server_log_*` is exactly the window between this run's first and last marker —
 checkpoints, autovacuum activity and errors, in the same order as the phases they explain.
+That window only holds them if the server was told to write them and the role may read
+them, which is what `--init` prepares (see "Server-Side Evidence").
 
 ## Stop Or Restart Cleanly
 

@@ -61,7 +61,7 @@ db_available() {
 # postgresql_textarray is deliberately not listed: the authoritative smoke run above is a
 # textarray run compared against goldens, so it would only duplicate that coverage.
 # mariadb_rocksdb is optional by design: it needs a MariaDB build with the RocksDB engine, and
-# no official image has one (see conf/db.mariadb_rocksdb.env.example).
+# no official image has one (see conf/db.mariadb_rocksdb.env).
 BACKEND_SMOKES="${BACKEND_SMOKES:-postgresql_row postgresql_json postgrenosql mariadb_innodb mariadb_rocksdb mongodb neo4j couchbase}"
 # The PostgreSQL family shares one server here, so its absence means something broke.
 REQUIRED_BACKEND_SMOKES="${REQUIRED_BACKEND_SMOKES:-postgresql_row postgresql_json postgrenosql}"

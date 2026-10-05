@@ -101,6 +101,45 @@ EOF
 out="$(config::load_file "$TMP/eval.env" 2>&1)" && bad "command substitution must be rejected" || ok
 has "config is not executed" "$out" "substitution"
 
+# --- layered loading: db.<family>.env before db.<backend>.env -----------------------
+
+check_layered_family() {
+    (
+        set -euo pipefail
+        CONF_DIR="$TMP/layered"
+        mkdir -p "$CONF_DIR"
+        ACTIVE_BACKEND=famchild
+        registry::info() { [[ "${1:-}" == conf_family ]] && printf 'fam' || return 0; }
+        cat > "$CONF_DIR/db.fam.env" <<'EOF'
+SHARED=from_family
+ONLY_FAMILY=yes
+EOF
+        cat > "$CONF_DIR/db.famchild.env" <<'EOF'
+SHARED=from_backend
+EOF
+        config::snapshot_env
+        config::load_layered_files
+        [[ "$SHARED" == from_backend ]] || exit 41     # per-backend wins on a clash
+        [[ "$ONLY_FAMILY" == yes ]] || exit 42         # family settings still apply
+    )
+}
+check_layered_family && ok || bad "layered files: family + per-backend precedence (rc=$?)"
+
+check_layered_env_wins() {
+    (
+        set -euo pipefail
+        CONF_DIR="$TMP/layered"
+        ACTIVE_BACKEND=famchild
+        registry::info() { [[ "${1:-}" == conf_family ]] && printf 'fam' || return 0; }
+        SHARED=from_env
+        export SHARED
+        config::snapshot_env
+        config::load_layered_files >/dev/null
+        [[ "$SHARED" == from_env ]] || exit 43         # environment beats both files
+    )
+}
+check_layered_env_wins && ok || bad "layered files: environment beats family and backend (rc=$?)"
+
 # --- legacy launcher aliases: gone (step 8c); master's names are synonyms ----------
 
 # The deprecated backend-name aliases were deleted at step 8c: an old backend spelling must fail

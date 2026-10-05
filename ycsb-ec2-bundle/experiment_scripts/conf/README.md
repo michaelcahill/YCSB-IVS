@@ -4,7 +4,9 @@
 
 1. built-in defaults — `lib/config.sh`
 2. backend defaults — `lib/backends/<backend>.sh` → `backend::default_config`
-3. `conf/db.<backend>.env` — loaded automatically when it exists
+3. `conf/db.<family>.env`, then `conf/db.<backend>.env` — loaded automatically when they
+   exist (the family is named by the backend's `conf_family`; the four PostgreSQL backends
+   share `db.postgresql.env`, and the per-backend file wins on a clash)
 4. `--config FILE` — any of the files in this directory, applied in the order given
 5. environment variables
 6. CLI flags (`--epochs`, `--steps`, `--run-id`, `--type`, `--scale`, `--workload`,
@@ -17,7 +19,8 @@ comments and `KEY=VALUE` assignments (an optional leading `export` is accepted, 
 layer of matching quotes is stripped). Anything else — command substitution, function
 definitions, control flow — makes the run fail before it touches the database. That is
 what allows layer 5 to beat layers 3 and 4: a file can never override something you
-exported yourself, and the runner says so:
+exported yourself (so machine-specific secrets stay in the environment), and the runner
+says so:
 
 ```
 [config] conf/scale.light.env: 1 assignment(s) ignored, the environment already sets them
@@ -29,7 +32,8 @@ quote the value.
 
 | File | Purpose |
 | --- | --- |
-| `db.<backend>.env` | endpoint, role and credentials. **Not committed** — copy from `db.<backend>.env.example` and keep the real file at mode 0600 |
+| `db.<family>.env` | settings shared by several backends on one server — `db.postgresql.env` is the endpoint/role of the four PostgreSQL schemas **and** the `--init` administrator connection (`PG_INIT_ADMIN_CLI_WRAP=sudo -u postgres` by default) |
+| `db.<backend>.env` | endpoint, role and credentials for one backend; committed with working defaults and commented options. Machine-specific values — especially real passwords — belong in exported environment variables, which beat the file |
 | `scale.heavy.env`, `scale.light.env` | record/operation counts for the two documented scale modes; apply with `--config`, they are not loaded automatically because silently resizing a dataset changes what a run measures |
 | `experiments/<preset>.env` | a named experiment: type, distributions, epochs, vacuum policy |
 

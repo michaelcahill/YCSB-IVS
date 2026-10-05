@@ -13,6 +13,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_postgresql_common.sh"
 backend::info() {
     cat <<INFO
 display_name=PostgreSQL 18 (text-array schema)
+conf_family=postgresql
 default_type=postgresql_textarrays_autovacuum
 default_workload=workloadc-uniform-heavy
 default_binding=jdbc-array
@@ -24,6 +25,7 @@ requires_index_wait=0
 supports_vacuum=1
 supports_maintenance_mode=1
 supports_query_plan=1
+supports_init_access=1
 runtime_watcher_dialect=postgresql
 host_os_user=postgres
 INFO

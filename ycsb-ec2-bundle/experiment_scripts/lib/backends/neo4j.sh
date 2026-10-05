@@ -17,7 +17,7 @@
 #     benchmark role cannot restart a service, and a run must not need sudo;
 #   * the APOC graphml export/import still moves main -> comparison, but into a path relative to
 #     each instance's import directory, which therefore has to be shared (or copied — see
-#     NEO4J_BACKUP_COPY_CMD in conf/db.neo4j.env.example);
+#     NEO4J_BACKUP_COPY_CMD in conf/db.neo4j.env);
 #   * cypher-shell's plain output quotes strings, so keys and sizes are produced as one joined
 #     column and unquoted here. The legacy runners kept the quotes, which is why their
 #     "delete the keys inserted during the run" step deleted nothing at all;
